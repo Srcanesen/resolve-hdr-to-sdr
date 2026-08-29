@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HdrToSdr — Inspection Prototype</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<h1>HdrToSdr — Inspection Prototype</h1>
+<p class="notice"><strong>Sample-limited prototype:</strong> This prototype only accepts <code>.mov/.mp4</code> files under the <code>Sample/</code> root inside the project. The filesystem path must be sent only as a resolved absolute path. Browser upload is handled as raw <code>octet-stream</code> bytes (upload protocol capped at 32 MiB), inspected in a private temp directory, and deleted. Conversion / output / Resolve drag are <strong>intentionally not implemented</strong> in this prototype.</p>
+
+<section id="drop-zone" class="drop-zone" tabindex="0" aria-label="File drop area">
+  <p>Drag and drop or choose a file</p>
+  <input type="file" id="file-input" accept=".mov,.mp4" hidden>
+  <button type="button" id="picker-btn">Choose file</button>
+</section>
+
+<section class="panel">
+  <h2>Inspect with Local Absolute Path</h2>
+  <form id="path-form">
+    <label for="path-input">Absolute local path (under <code>Sample/</code>):</label>
+    <input type="text" id="path-input" placeholder="/.../Sample/1.MOV" autocomplete="off" spellcheck="false">
+    <button type="submit" id="inspect-path-btn">Inspect</button>
+  </form>
+</section>
+
+<section class="status">
+  <h2>Status: <span id="status-text">pending</span></h2>
+  <div id="spinner" class="spinner hidden" aria-hidden="true">Inspecting…</div>
+  <pre id="result" class="result">No inspection yet.</pre>
+</section>
+
+<section class="controls">
+  <button id="convert-btn" disabled>Convert</button>
+  <p id="convert-note" class="note">Conversion is not implemented in this prototype. Only eligibility is shown.</p>
+  <div id="eligibility" class="eligibility hidden">
+    <p><strong>Profile:</strong> <span id="profile-id">-</span></p>
+    <p id="eligibility-text"></p>
+  </div>
+</section>
+
+<footer>
+  <p>Privacy: Responses only include the display name, size, SHA-256, and technical color fields. No raw path, ffprobe output, GPS, or meta tags are shown. The server only runs on 127.0.0.1.</p>
+</footer>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

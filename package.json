@@ -1,0 +1,27 @@
+{
+  "name": "resolve-hdr-to-sdr",
+  "version": "0.1.0",
+  "description": "Resolve HDR to SDR — metadata-driven HDR to Rec.709 SDR converter with DaVinci Resolve Workflow Integration drag-out",
+  "license": "MIT",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Srcanesen/resolve-hdr-to-sdr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Srcanesen/resolve-hdr-to-sdr/issues"
+  },
+  "homepage": "https://github.com/Srcanesen/resolve-hdr-to-sdr#readme",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron electron/main.cjs",
+    "test:electron": "node --test electron/test/*.test.cjs",
+    "test:python": "python3 -m unittest discover -s tests -v",
+    "test": "npm run test:python && npm run test:electron",
+    "check": "npm run test:python && npm run test:electron",
+    "bundle:resolve": "node scripts/build-workflow-integration.cjs"
+  },
+  "devDependencies": {
+    "electron": "^41.10.3"
+  }
+}

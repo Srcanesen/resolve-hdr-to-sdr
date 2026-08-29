@@ -1,0 +1,33 @@
+# Large/regenerable media
+Output/**
+Sample/**
+
+# Local tooling symlinks (provenance lives in tools/PROVENANCE.txt)
+tools/ffmpeg
+tools/ffprobe
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Workflow Integration bundle (reproducible, ignored)
+build/
+
+# Secrets / local env (never committed)
+.env
+*.env
+*.pem
+*.key
+settings.local.json
+*.yedek
+*.bak
+

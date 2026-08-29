@@ -1,0 +1,35 @@
+Install provenance for HdrToSdr libplacebo-capable FFmpeg
+----------------------------------------------------------
+Attempted standalone osxexperts.net static builds:
+ - https://www.osxexperts.net/ffmpeg9arm.zip (Apple Silicon, FFmpeg 9.0)
+   SHA256 (downloaded 2026-08-25): d0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9
+   Verification: downloaded, unzipped, checked `ffmpeg -h filter=libplacebo` => unavailable, `zscale` => available, config lacks --enable-libplacebo.
+   Conclusion: NOT libplacebo-capable; rejected as primary. Retained in /tmp/fftest for audit, not installed under tools/.
+
+Primary install chosen:
+ - Homebrew formula `ffmpeg-full` (keg-only, does NOT replace /opt/homebrew/bin/ffmpeg)
+   Version: 9.0.1_1 (bottle arm64_tahoe), reported as `ffmpeg version 9.0.1`
+   Configuration includes: --enable-libplacebo --enable-libzimg (hence zscale), plus Vulkan deps
+   Additional dependency installed for libplacebo Vulkan runtime on macOS: `molten-vk` 1.4.2 (MoltenVK, bottle)
+     plus already-present `vulkan-headers` 1.4.357.0 and `vulkan-loader` 1.4.357.0
+   Binary paths:
+     /opt/homebrew/Cellar/ffmpeg-full/9.0.1_1/bin/ffmpeg
+     /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg (symlink)
+   Keg-only status verified: `brew info ffmpeg-full` => "keg-only, ... not symlinked into /opt/homebrew, because this is an alternate version"
+     Existing system ffmpeg preserved: /opt/homebrew/bin/ffmpeg remains 8.1.2_1 (Linked, 8.1.2)
+   Verification:
+     /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg -hide_banner -h filter=libplacebo  => "Filter libplacebo" available, options include tonemapping=mobius, gamut_mode=perceptual, colorspace=bt709, apply_dolbyvision
+     /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg -hide_banner -h filter=zscale     => "Filter zscale" available
+     Runtime test: libplacebo filter initializes only after molten-vk installed (VK_ERROR_INCOMPATIBLE_DRIVER before, success after)
+
+Tools references:
+ - tools/ffmpeg  -> /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg (symlink)
+ - tools/ffprobe -> /opt/homebrew/opt/ffmpeg-full/bin/ffprobe (symlink)
+ - This file documents provenance; tools/ does not contain a standalone static zip because the reputable standalone (osxexperts) lacks libplacebo.
+
+System ffmpeg upgrade note (2026-08-25, post ffmpeg-full install):
+ - Installing ffmpeg-full pulled x265 4.3 (replacing 216), which broke the linked /opt/homebrew/bin/ffmpeg 8.1.2_1 at runtime (dyld libx265.216 missing).
+ - Remediation: `brew reinstall ffmpeg` upgraded system ffmpeg to 9.0.1_1 (bottle, same version number but config WITHOUT --enable-libplacebo).
+   Verified: `/opt/homebrew/bin/ffmpeg -version` now 9.0.1, `ffmpeg -h filter=libplacebo` => Unknown; `ffmpeg-full` still 9.0.1 with libplacebo.
+ - Thus the core formula WAS replaced (8.1.2 -> 9.0.1) solely due to shared x265 ABI; ffmpeg-full remains keg-only and is the only libplacebo source.
+   Original 8.1.2 binary is no longer present; new system ffmpeg preserves the "no libplacebo" property, so script detection still correctly prefers ffmpeg-full/tools.

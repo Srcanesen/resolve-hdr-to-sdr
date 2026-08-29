@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'">
+<title>HdrToSdr</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<main class="app">
+  <header class="app-header">
+    <h1 class="app-title">HdrToSdr</h1>
+    <p class="app-subtitle">Convert HDR video to a Rec.709 SDR output. The source file is not modified.</p>
+  </header>
+
+  <section id="workflow" class="workflow" aria-busy="false">
+    <!-- Idle: drop target + primary picker -->
+    <div id="state-idle">
+      <div id="drop-zone" class="drop-zone">
+        <p class="drop-title">Drop your video here</p>
+        <p class="drop-support">MOV or MP4</p>
+        <button type="button" id="btn-select" class="btn btn-primary">Choose file</button>
+      </div>
+    </div>
+
+    <!-- Inspecting -->
+    <div id="state-inspecting" class="state" hidden>
+      <p class="status-line"><span aria-hidden="true">●</span> Inspecting video…</p>
+      <div class="progress-wrap">
+        <div class="indeterminate-bar" role="progressbar" aria-label="Inspecting" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Inspecting video"></div>
+      </div>
+    </div>
+
+    <!-- Inspected file meta -->
+    <div id="state-file" class="state" hidden>
+      <div class="file-meta">
+        <span id="file-name" class="file-name">-</span>
+        <span id="file-details" class="file-details">-</span>
+      </div>
+    </div>
+
+    <!-- Eligible -->
+    <div id="state-eligible" class="state" hidden>
+      <p id="eligible-format" class="format-label"></p>
+      <p class="status-title">Ready to convert</p>
+      <p id="eligible-desc" class="status-desc">This video can be converted with a verified HDR → SDR profile.</p>
+      <div class="mt-12">
+        <button type="button" id="btn-convert" class="btn btn-primary">Convert HDR → SDR</button>
+        <p class="note">Creates a separate Rec.709 H.264 MP4 file. Compact and compatible.</p>
+      </div>
+    </div>
+
+    <!-- Converting -->
+    <div id="state-converting" class="state" hidden>
+      <p id="convert-phase" class="status-line">Preparing conversion…</p>
+      <div class="progress-wrap">
+        <progress id="convert-bar" max="100" value="0" aria-label="Conversion progress"></progress>
+      </div>
+      <div class="mt-8">
+        <button type="button" id="btn-cancel" class="btn btn-ghost btn-sm">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Verified -->
+    <div id="state-verified" class="state" hidden>
+      <div class="verified-layout">
+        <div class="verified-copy">
+          <p class="status-title">Output ready</p>
+          <p id="verified-desc" class="status-desc">-</p>
+        </div>
+        <div id="verified-thumb-wrap" class="verified-thumb-wrap" hidden>
+          <img id="output-thumb" class="output-thumb" alt="" width="120" height="68" hidden />
+        </div>
+      </div>
+      <div id="drag-control" class="drag-control" hidden>
+        <button type="button" id="drag-output" draggable="true" class="drag-button">Drag to Resolve</button>
+        <p class="drag-help">Drop into the Media Pool or timeline.</p>
+      </div>
+    </div>
+
+    <!-- Unsupported -->
+    <div id="state-unsupported" class="state" hidden>
+      <p id="unsupported-title" class="status-title">-</p>
+      <p id="unsupported-desc" class="status-desc">-</p>
+      <div class="mt-12">
+        <button type="button" class="btn btn-primary btn-retry">Choose another file</button>
+      </div>
+    </div>
+
+    <!-- Error -->
+    <div id="state-error" class="state" hidden>
+      <p id="error-text" class="status-desc" role="alert">-</p>
+      <div class="mt-12">
+        <button type="button" class="btn btn-primary btn-retry">Choose another file</button>
+      </div>
+    </div>
+
+    <!-- Technical details collapsed -->
+    <details id="technical-details" class="technical" hidden>
+      <summary>Technical details</summary>
+      <div class="tech-content">
+        <dl id="tech-grid" class="tech-grid"></dl>
+        <p id="tech-note" class="note mt-8"></p>
+      </div>
+    </details>
+
+    <!-- Hidden fallback inputs to preserve inspect contract without visible surface -->
+    <div hidden aria-hidden="true">
+      <input id="path-input" type="text" tabindex="-1" autocomplete="off" spellcheck="false" aria-hidden="true">
+      <button type="button" id="btn-inspect" tabindex="-1" aria-hidden="true">Inspect</button>
+    </div>
+
+    <!-- Live announcer for screen readers -->
+    <p id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+  </section>
+</main>
+<script src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<BlackmagicDesign>
+    <Plugin>
+        <Id>com.hdrtosdr.app</Id>
+        <Name>HdrToSdr</Name>
+        <Version>0.1.0</Version>
+        <Description>Verified HDR to Rec.709 SDR conversion</Description>
+        <FilePath>main.js</FilePath>
+    </Plugin>
+</BlackmagicDesign>
