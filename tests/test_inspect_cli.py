@@ -77,6 +77,13 @@ class TestInspectCli(unittest.TestCase):
         data = json.loads(res.stdout.decode())
         self.assertEqual(data["outcome"], "error")
 
+    def test_boolean_version_is_not_integer_version(self):
+        payload = json.dumps({"version": True, "path": "/nonexistent/secret.mov"}).encode()
+        res = run_cli(payload)
+        data = json.loads(res.stdout.decode())
+        self.assertEqual(data["outcome"], "error")
+        self.assertEqual(data["reason"], "invalid_request")
+
     def test_output_does_not_include_path_or_traceback(self):
         # Use sample path with spaces/unicode to ensure not leaked on error path? Use outside path
         payload = json.dumps({"version":1,"path": "/nonexistent/secret.mov"}).encode()

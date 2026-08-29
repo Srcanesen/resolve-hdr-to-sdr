@@ -201,11 +201,13 @@ test('conversion start dialog approved proceeds to executor', async () => {
   try {
     const fakeWindow = { webContents: { id: 60, send: () => {} } };
     const adapter = { inspect: async () => ({ outcome: 'complete', result: { classification: 'hlgKnownLocal', canConvert: true, profileId: PROFILE_ID, sha256: 'a'.repeat(64), size: 100, displayName: 'a.mp4' } }) };
-    const svc = new CS({ inspectionAdapter: adapter, bExecutor: { getFfmpegAbsolute: () => '/tmp/fake', runBConversion: async ({ stagingPath }) => { executorStarted = true; const fs = require('fs'); fs.writeFileSync(stagingPath, 'enc'); return { outcome: 'success' }; } }, verifierRunner: async () => 0 });
-    svc.validateSourcePathForSpawn = () => ({ ok: true, canonical: '/tmp/a.mp4' });
-    // Mock output store to tmp
+    // Mock output store and source to a private real temporary directory.
     const os = require('os'); const path = require('path'); const fs = require('fs');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-dlg-'));
+    const sourcePath = path.join(tmp, 'a.mp4');
+    fs.writeFileSync(sourcePath, 'source');
+    const svc = new CS({ inspectionAdapter: adapter, bExecutor: { getFfmpegAbsolute: () => '/tmp/fake', runBConversion: async ({ stagingPath }) => { executorStarted = true; fs.writeFileSync(stagingPath, 'enc'); return { outcome: 'success' }; } }, verifierRunner: async () => 0 });
+    svc.validateSourcePathForSpawn = () => ({ ok: true, canonical: sourcePath });
     const store = require('../output-store.cjs');
     svc.dependencies.outputStore = {
       ensureOutputRoot: () => { fs.mkdirSync(tmp, { recursive: true }); return tmp; },
@@ -216,7 +218,7 @@ test('conversion start dialog approved proceeds to executor', async () => {
     };
     ipcContract.attachIpc(fakeWindow, adapter, svc);
     svc.attachIpc(fakeWindow);
-    const token = svc.createSourceToken({ canonicalPath: '/tmp/a.mp4', sha256: 'a'.repeat(64), size: 100, profileId: PROFILE_ID, ownerWebContentsId: 60, displayName: 'a.mp4' });
+    const token = svc.createSourceToken({ canonicalPath: sourcePath, sha256: 'a'.repeat(64), size: 100, profileId: PROFILE_ID, ownerWebContentsId: 60, displayName: 'a.mp4' });
     const handler = mockIpc.handlers[CH];
     const res = await handler({ sender: fakeWindow.webContents }, { version: 1, sourceId: token, profileId: PROFILE_ID });
     assert.equal(res.outcome, 'accepted');

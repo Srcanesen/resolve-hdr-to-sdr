@@ -53,8 +53,8 @@ def _expected_hlg_match(ev: InspectionEvidence) -> bool:
         return False
     if ev.rpu_present != EXPECTED_HLG["rpu_present"]:
         return False
-    # level check
-    if ev.dv_level is None:
+    # The HEVC level is part of the trusted local-sample contract; presence alone is insufficient.
+    if ev.level != EXPECTED_HLG["level"]:
         return False
     # must have DOVI
     if not ev.has_dovi:
@@ -182,6 +182,15 @@ def classify(ev: InspectionEvidence) -> ClassificationResult:
                     can_convert=False,
                     evidence=ev,
                 )
+
+    # Conflicting metadata is distinct from merely unsupported Dolby metadata and must fail closed.
+    if ev.is_contradictory:
+        return ClassificationResult(
+            classification=Classification.uncertain,
+            reason="contradictory_metadata",
+            can_convert=False,
+            evidence=ev,
+        )
 
     # Dolby Vision precedence over PQ (fail-closed)
     if ev.has_dovi:

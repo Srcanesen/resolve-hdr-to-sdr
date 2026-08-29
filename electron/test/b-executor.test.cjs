@@ -114,13 +114,13 @@ test('buildFfmpegArgs never includes guessed fallback', () => {
   assert.equal(asString.includes('tonemap='), false);
 });
 
-test('checkCapability fails when ffmpeg missing', () => {
-  const res = bExecutor.checkCapability('/nonexistent/ffmpeg');
+test('checkCapability fails when ffmpeg missing', async () => {
+  const res = await bExecutor.checkCapability('/nonexistent/ffmpeg');
   assert.equal(res.ok, false);
   assert.equal(res.reason, 'profile_unavailable');
 });
 
-test('checkCapability is profile-aware and fails closed on missing profile tokens', () => {
+test('checkCapability is profile-aware and fails closed on missing profile tokens', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-capability-'));
   const quote = (value) => `'${value.replace(/'/g, "'\\\\''")}'`;
   const makeFake = (name, libplaceboLines, eqLines, eqStatus = 0) => {
@@ -159,21 +159,21 @@ test('checkCapability is profile-aware and fails closed on missing profile token
       [...common, 'spline', 'tonemapping_param'],
       ['Filter eq', 'gamma'],
     );
-    assert.equal(bExecutor.checkCapability(localOnly, PROFILE_ID_LOCAL_B).ok, true);
-    assert.equal(bExecutor.checkCapability(localOnly, PROFILE_ID_GENERIC).reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(localOnly, PROFILE_ID_LOCAL_B)).ok, true);
+    assert.equal((await bExecutor.checkCapability(localOnly, PROFILE_ID_GENERIC)).reason, 'profile_unavailable');
 
     // Generic must pass without probing eq and must reject a libplacebo lacking exact BT.2390.
     const genericOnly = makeFake('generic-only-ffmpeg', [...common, 'bt.2390'], [], 1);
-    assert.equal(bExecutor.checkCapability(genericOnly, PROFILE_ID_GENERIC).ok, true);
-    assert.equal(bExecutor.checkCapability(genericOnly, PROFILE_ID_LOCAL_B).reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(genericOnly, PROFILE_ID_GENERIC)).ok, true);
+    assert.equal((await bExecutor.checkCapability(genericOnly, PROFILE_ID_LOCAL_B)).reason, 'profile_unavailable');
 
-    assert.equal(bExecutor.checkCapability(genericOnly, 'unknown-profile').reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(genericOnly, 'unknown-profile')).reason, 'profile_unavailable');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('checkCapability fails closed when sidedata or a required enum token is missing', () => {
+test('checkCapability fails closed when sidedata or a required enum token is missing', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-sidedata-capability-'));
   const makeFake = (name, sidedataLines) => {
     const fake = path.join(tmp, name);
@@ -200,9 +200,9 @@ test('checkCapability fails closed when sidedata or a required enum token is mis
   const full = EXPECTED_OUTPUT_SANITIZATION_SUFFIX.split(',').map((filter) => filter.split('type=')[1]);
   try {
     const missingFilter = makeFake('missing-sidedata-filter', []);
-    assert.equal(bExecutor.checkCapability(missingFilter, PROFILE_ID_PQ).reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(missingFilter, PROFILE_ID_PQ)).reason, 'profile_unavailable');
     const missingEnum = makeFake('missing-sidedata-enum', ['Filter sidedata', ...full.slice(1)]);
-    assert.equal(bExecutor.checkCapability(missingEnum, PROFILE_ID_PQ).reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(missingEnum, PROFILE_ID_PQ)).reason, 'profile_unavailable');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -266,33 +266,30 @@ test('runBConversion with mocked capability still isolates', async () => {
   assert.equal(typeof bExecutor.runBConversion, 'function');
 });
 
-test('capability preflight does not use shell-interpolated execSync', () => {
+test('capability preflight is asynchronous and does not use shell-interpolated execSync', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'b-executor.cjs'), 'utf8');
-  // Must not contain execSync with shell interpolation
+  // Must not contain synchronous or shell-interpolated execution.
   assert.equal(src.includes('execSync(`"${ffmpegPath}"'), false, 'should not use interpolated execSync');
   assert.equal(src.includes('execSync(`${ffmpegPath}'), false);
   assert.equal(/execSync\s*\(/.test(src), false, 'should not contain execSync at all');
-  // Must use spawnSync or execFileSync with shell:false and argv array
-  assert.ok(src.includes('spawnSync'), 'should use spawnSync');
+  assert.equal(/spawnSync\s*\(/.test(src), false, 'capability checks must not block the main thread');
+  assert.ok(src.includes('spawn'), 'should use asynchronous spawn');
   assert.ok(src.includes('shell: false'), 'should pass shell:false');
-  // Verify ffmpegPath is passed as absolute first arg, not interpolated string
-  assert.ok(/spawnSync\s*\(\s*ffmpegPath\s*,\s*\[/.test(src), 'should call spawnSync(ffmpegPath, [...])');
-  // Ensure both probes use argv arrays
   assert.ok(src.includes("'filter=libplacebo'") || src.includes('"filter=libplacebo"') || src.includes('filter=libplacebo'));
   assert.ok(src.includes("'filter=eq'") || src.includes('"filter=eq"') || src.includes('filter=eq'));
   assert.ok(src.includes("'encoder=libx264'") || src.includes('"encoder=libx264"') || src.includes('encoder=libx264'));
   assert.ok(src.includes("'encoder=aac'") || src.includes('"encoder=aac"') || src.includes('encoder=aac'));
 });
 
-test('checkCapability generic profile_unavailable on any failure without leak', () => {
+test('checkCapability generic profile_unavailable on any failure without leak', async () => {
   // Non-executable path
-  const r1 = bExecutor.checkCapability('/tmp');
+  const r1 = await bExecutor.checkCapability('/tmp');
   assert.equal(r1.ok, false);
   assert.equal(r1.reason, 'profile_unavailable');
   assert.equal(r1.stderr, undefined);
   // Path with shell metacharacters should not be executed via shell — should still be profile_unavailable safely
   const tricky = '/tmp/ffmpeg; echo hacked';
-  const r2 = bExecutor.checkCapability(tricky);
+  const r2 = await bExecutor.checkCapability(tricky);
   assert.equal(r2.ok, false);
   assert.equal(r2.reason, 'profile_unavailable');
   // Ensure no exception propagates

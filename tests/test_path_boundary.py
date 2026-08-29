@@ -97,6 +97,18 @@ class TestPathBoundary(unittest.TestCase):
                 if link_dir.is_symlink():
                     link_dir.unlink()
 
+    def test_user_selected_rejects_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as tmpd:
+            real_dir = Path(tmpd) / "real"
+            real_dir.mkdir()
+            real_file = real_dir / "source.mov"
+            real_file.write_bytes(b"video")
+            link_dir = Path(tmpd) / "link"
+            link_dir.symlink_to(real_dir, target_is_directory=True)
+            with self.assertRaises(PathValidationError) as cm:
+                validate_user_selected_path(str(link_dir / "source.mov"), REPO_ROOT)
+            self.assertEqual(cm.exception.reason, "symlink_rejected")
+
     def test_directory_rejected(self):
         with self.assertRaises(PathValidationError) as cm:
             validate_local_path(str(SAMPLE_ROOT), REPO_ROOT)

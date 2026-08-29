@@ -19,6 +19,47 @@ let conversionService = null;
 let started = false;
 let cleanupDone = false;
 let workflowIntegration = null;
+let beforeQuitApp = null;
+let beforeQuitHandler = null;
+
+function logStartupFailure(stage = 'startup') {
+  const safeStages = new Set(['host_lifecycle', 'app_ready', 'window_create', 'startup']);
+  const safeStage = safeStages.has(stage) ? stage : 'startup';
+  try { console.error(`[HdrToSdr] startup failed (${safeStage})`); } catch {}
+}
+
+function disposeRuntime() {
+  try { if (conversionService && typeof conversionService.dispose === 'function') conversionService.dispose(); } catch {}
+}
+
+function cleanupHost(wi) {
+  if (!wi || cleanupDone) return;
+  cleanupDone = true;
+  try { if (typeof wi.CleanUp === 'function') wi.CleanUp(); } catch {}
+}
+
+function removeBeforeQuitHandler() {
+  if (beforeQuitApp && beforeQuitHandler && typeof beforeQuitApp.removeListener === 'function') {
+    try { beforeQuitApp.removeListener('before-quit', beforeQuitHandler); } catch {}
+  }
+  beforeQuitApp = null;
+  beforeQuitHandler = null;
+}
+
+function installBeforeQuitHandler(appObj, wi, isHost) {
+  removeBeforeQuitHandler();
+  const handler = () => {
+    disposeRuntime();
+    if (isHost) cleanupHost(wi);
+  };
+  try {
+    appObj.on('before-quit', handler);
+    beforeQuitApp = appObj;
+    beforeQuitHandler = handler;
+  } catch {
+    throw new Error('before_quit_listener_failed');
+  }
+}
 
 function getExpectedFileUrl() {
   const filePath = path.resolve(__dirname, 'renderer', 'index.html');
@@ -108,8 +149,15 @@ function createWindowInternal() {
   return mainWindow;
 }
 
-async function hostLifecycle(wi, appObj) {
+async function hostLifecycle(wi, appObj, onPartialFailure = () => {}) {
   let ok;
+  let initialized = false;
+  const fail = () => {
+    if (initialized) {
+      try { onPartialFailure(); } catch {}
+    }
+    return false;
+  };
   try {
     ok = wi.Initialize(PLUGIN_ID);
     if (ok && typeof ok.then === 'function') ok = await ok;
@@ -117,13 +165,14 @@ async function hostLifecycle(wi, appObj) {
     ok = false;
   }
   if (!ok) return false;
+  initialized = true;
   try {
     ok = wi.SetAPITimeout(10);
     if (ok && typeof ok.then === 'function') ok = await ok;
   } catch {
     ok = false;
   }
-  if (!ok) return false;
+  if (!ok) return fail();
   try {
     const quitCb = () => { try { appObj.quit(); } catch {} };
     ok = wi.RegisterCallback('ResolveQuit', quitCb);
@@ -131,7 +180,7 @@ async function hostLifecycle(wi, appObj) {
   } catch {
     ok = false;
   }
-  if (!ok) return false;
+  if (!ok) return fail();
   return true;
 }
 
@@ -158,26 +207,32 @@ async function startApp(options = {}) {
   if (isHost) {
     let lifecycleOk = false;
     try {
-      lifecycleOk = await hostLifecycle(wi, appObj);
+      lifecycleOk = await hostLifecycle(wi, appObj, () => cleanupHost(wi));
     } catch {
       lifecycleOk = false;
     }
     if (!lifecycleOk) {
+      logStartupFailure('host_lifecycle');
       failClosedGeneric(appObj);
       return { ok: false, reason: 'startup_failed' };
     }
-    const doCleanup = () => {
-      if (cleanupDone) return;
-      cleanupDone = true;
-      try { wi.CleanUp(); } catch {}
-    };
-    try { appObj.removeAllListeners('before-quit'); } catch {}
-    appObj.on('before-quit', doCleanup);
   }
 
-  const whenReady = appObj.whenReady ? appObj.whenReady() : Promise.resolve();
-  await whenReady;
-  createWindowInternal();
+  try {
+    // Install before readiness so a later app/window failure still has one
+    // owned cleanup edge. Do not remove listeners owned by the host.
+    installBeforeQuitHandler(appObj, wi, isHost);
+    const whenReady = typeof appObj.whenReady === 'function' ? appObj.whenReady() : Promise.resolve();
+    await whenReady;
+    createWindowInternal();
+  } catch {
+    removeBeforeQuitHandler();
+    disposeRuntime();
+    if (isHost) cleanupHost(wi);
+    logStartupFailure('app_ready');
+    failClosedGeneric(appObj);
+    return { ok: false, reason: 'startup_failed' };
+  }
 
   if (!appObj._hdrHandlersInstalled) {
     appObj._hdrHandlersInstalled = true;
@@ -195,6 +250,8 @@ async function startApp(options = {}) {
 }
 
 function _resetForTest() {
+  removeBeforeQuitHandler();
+  disposeRuntime();
   started = false;
   cleanupDone = false;
   workflowIntegration = null;
@@ -210,8 +267,17 @@ function _resetForTest() {
 
 if (require.main === module) {
   startApp().catch(() => {
+    logStartupFailure();
     failClosedGeneric(app);
   });
 }
 
-module.exports = { startApp, _resetForTest, getExpectedFileUrl, PLUGIN_ID, OUTPUT_DRAG_CHANNEL, DRAG_ICON_DATAURL };
+module.exports = {
+  startApp,
+  _resetForTest,
+  getExpectedFileUrl,
+  _getConversionServiceForTest: () => conversionService,
+  PLUGIN_ID,
+  OUTPUT_DRAG_CHANNEL,
+  DRAG_ICON_DATAURL,
+};

@@ -62,6 +62,8 @@ test('drag permitted only after verifier PASS and opaque', async () => {
     assert.ok(rec.canonicalOutputRoot);
     assert.equal(rec.ownerWebContentsId, 10);
     assert.equal(rec.displayName.endsWith('.mp4'), true);
+    assert.ok(rec.fingerprint && rec.fingerprint.sha256, 'verified output must have a fingerprint');
+    const originalOutputBytes = fs.readFileSync(rec.canonicalPath);
     // Verify that rec does not leak via renderer? Just check internal store has path
     // But ensure that valid drag succeeds with same owner
     const ok1 = svc.resolveOutputForDrag({ outputId, senderWebContentsId: 10 });
@@ -87,7 +89,7 @@ test('drag permitted only after verifier PASS and opaque', async () => {
     const symlinkFail = svc.resolveOutputForDrag({ outputId, senderWebContentsId: 10 });
     assert.equal(symlinkFail.ok, false, 'symlink replaced file should fail');
     fs.unlinkSync(rec.canonicalPath);
-    fs.writeFileSync(rec.canonicalPath, 'restored');
+    fs.writeFileSync(rec.canonicalPath, originalOutputBytes);
     // After restore, realpath check should still pass? Need to ensure file is regular and realpath equals canonical
     const okAfterSymlinkRestore = svc.resolveOutputForDrag({ outputId, senderWebContentsId: 10 });
     assert.equal(okAfterSymlinkRestore.ok, true);
@@ -118,6 +120,7 @@ test('drag revalidation checks direct containment and non-symlink root', () => {
       displayName: 'file_sdr.mov',
       ownerWebContentsId: 5,
       verified: true,
+      fingerprint: { size: 4, sha256: crypto.createHash('sha256').update('data').digest('hex') },
     });
     assert.equal(svc.resolveOutputForDrag({ outputId: oid, senderWebContentsId: 5 }).ok, true);
     // Direct containment: file outside root should fail (simulate by storing path outside)

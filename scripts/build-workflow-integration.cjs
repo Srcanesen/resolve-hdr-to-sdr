@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
+const { BUNDLE_FILE_ALLOWLIST, sha256File, auditBundle } = require('./bundle-audit.cjs');
 
 const PLUGIN_ID = 'com.hdrtosdr.app';
 const PLUGIN_NAME = 'HdrToSdr';
@@ -58,9 +58,25 @@ function ensureDirExists(p, label) {
   if (!lst.isDirectory()) fail(`${name} must be directory: ${p}`);
 }
 
-function sha256File(p) {
-  const data = fs.readFileSync(p);
-  return crypto.createHash('sha256').update(data).digest('hex');
+function copyAllowlistedFiles(sourceRoot, destinationRoot, relativeFiles) {
+  for (const relative of relativeFiles) {
+    let component = sourceRoot;
+    for (const part of relative.split(path.sep)) {
+      component = path.join(component, part);
+      let componentStat;
+      try { componentStat = fs.lstatSync(component); } catch (e) { fail(`Allowlisted source missing: ${relative} (${e.message})`); }
+      if (componentStat.isSymbolicLink()) fail(`Allowlisted source has symlink component: ${relative}`);
+    }
+    const source = path.join(sourceRoot, relative);
+    const destination = path.join(destinationRoot, relative);
+    let stat;
+    try { stat = fs.lstatSync(source); } catch (e) { fail(`Allowlisted source missing: ${relative} (${e.message})`); }
+    if (stat.isSymbolicLink()) fail(`Allowlisted source must not be symlink: ${relative}`);
+    if (!stat.isFile()) fail(`Allowlisted source must be regular file: ${relative}`);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
+    try { fs.chmodSync(destination, relative.endsWith('verify-spike.sh') ? 0o755 : (stat.mode & 0o777)); } catch {}
+  }
 }
 
 function copyDereferencedFile(src, dest) {
@@ -104,45 +120,28 @@ function shouldSkipEntry(name) {
   return false;
 }
 
-function copyDirRecursiveSync(src, dest) {
-  if (fs.cpSync) {
-    // Manual filter when using cpSync is complex; fall back to manual filtered copy to honor skips
-  }
+function copyDirRecursiveSync(src, dest, visited = new Set()) {
+  // This helper is retained for local callers, but never follows links. A
+  // symlinked directory could otherwise create an unbounded traversal cycle.
+  const real = fs.realpathSync(src);
+  if (visited.has(real)) fail(`directory cycle while copying ${src}`);
+  visited.add(real);
   const entries = fs.readdirSync(src, { withFileTypes: true });
   fs.mkdirSync(dest, { recursive: true });
   for (const ent of entries) {
     if (shouldSkipEntry(ent.name)) continue;
     const srcPath = path.join(src, ent.name);
     const destPath = path.join(dest, ent.name);
-    let lst;
-    try { lst = fs.lstatSync(srcPath); } catch { fail(`Failed lstat ${srcPath}`); }
-    if (lst.isSymbolicLink()) {
-      let real;
-      try { real = fs.realpathSync(srcPath); } catch { fail(`Failed realpath symlink ${srcPath}`); }
-      let realLst;
-      try { realLst = fs.lstatSync(real); } catch { fail(`Real target missing ${real}`); }
-      if (realLst.isSymbolicLink()) fail(`Nested symlink target still symlink: ${real}`);
-      if (realLst.isDirectory()) {
-        if (shouldSkipEntry(path.basename(real))) continue;
-        copyDirRecursiveSync(real, destPath);
-      } else if (realLst.isFile()) {
-        if (shouldSkipEntry(path.basename(real))) continue;
-        fs.mkdirSync(path.dirname(destPath), { recursive: true });
-        fs.copyFileSync(real, destPath);
-        try { fs.chmodSync(destPath, realLst.mode); } catch {}
-      } else {
-        fail(`Unsupported symlink target type for ${srcPath} -> ${real}`);
-      }
-    } else if (lst.isDirectory()) {
-      copyDirRecursiveSync(srcPath, destPath);
-    } else if (lst.isFile()) {
+    const lst = fs.lstatSync(srcPath);
+    if (lst.isSymbolicLink()) fail(`source symlink is not allowed: ${srcPath}`);
+    if (lst.isDirectory()) copyDirRecursiveSync(srcPath, destPath, visited);
+    else if (lst.isFile()) {
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       fs.copyFileSync(srcPath, destPath);
-      try { fs.chmodSync(destPath, lst.mode); } catch {}
-    } else {
-      fail(`Unsupported file type ${srcPath}`);
-    }
+      try { fs.chmodSync(destPath, lst.mode & 0o777); } catch {}
+    } else fail(`Unsupported file type ${srcPath}`);
   }
+  visited.delete(real);
 }
 
 function walkNoSymlinkSync(root) {
@@ -286,19 +285,11 @@ function main() {
   fs.writeFileSync(path.join(BUILD_ROOT, 'package.json'), JSON.stringify(pkg, null, 2) + '\n', 'utf8');
   ok('Generated package.json');
 
-  copyDirRecursiveSync(path.join(REPO_ROOT, 'electron'), path.join(BUILD_ROOT, 'electron'));
-  ok('Copied electron directory');
-
-  copyDirRecursiveSync(path.join(REPO_ROOT, 'prototype'), path.join(BUILD_ROOT, 'prototype'));
-  ok('Copied prototype directory');
-
-  const verifySrc = path.join(REPO_ROOT, 'scripts', 'verify-spike.sh');
-  const verifyDest = path.join(BUILD_ROOT, 'scripts', 'verify-spike.sh');
-  fs.mkdirSync(path.dirname(verifyDest), { recursive: true });
-  fs.copyFileSync(verifySrc, verifyDest);
-  try { fs.chmodSync(verifyDest, 0o755); } catch {}
-  ensureFileExists(verifyDest, { executable: true, label: 'bundle scripts/verify-spike.sh' });
-  ok('Copied scripts/verify-spike.sh');
+  const sourceRuntimeFiles = BUNDLE_FILE_ALLOWLIST.filter((relative) => (
+    relative.startsWith('electron/') || relative.startsWith('prototype/') || relative === 'scripts/verify-spike.sh'
+  ));
+  copyAllowlistedFiles(REPO_ROOT, BUILD_ROOT, sourceRuntimeFiles);
+  ok(`Copied ${sourceRuntimeFiles.length} allowlisted runtime files`);
 
   copyDereferencedFile(ffmpegLink, path.join(BUILD_ROOT, 'tools', 'ffmpeg'));
   copyDereferencedFile(ffprobeLink, path.join(BUILD_ROOT, 'tools', 'ffprobe'));
@@ -343,6 +334,10 @@ function main() {
 
   walkNoSymlinkSync(BUILD_ROOT);
   ok('Verified bundle has no symlinks');
+
+  const bundleAudit = auditBundle(BUILD_ROOT);
+  if (!bundleAudit.ok) fail(`Bundle allowlist audit failed: ${bundleAudit.reason}`);
+  ok(`Bundle allowlist audit passed (${bundleAudit.files.length} regular files)`);
 
   const ffmpegDest = path.join(BUILD_ROOT, 'tools', 'ffmpeg');
   const ffprobeDest = path.join(BUILD_ROOT, 'tools', 'ffprobe');

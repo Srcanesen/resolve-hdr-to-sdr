@@ -31,6 +31,7 @@ const COPY = {
   dropUnavailable: 'Could not get the file. Try choosing a file instead.',
   inspectionFailed: 'Video could not be inspected. Check the file type.',
   profileUnavailable: 'Conversion is not available on this system.',
+  outputRootUnsafe: 'The output folder is not safe. No file was created.',
   verificationFailed: 'Output could not be verified. File was not made available.',
   conversionFailed: 'Conversion could not be completed. Inspect the video again and try again.',
   cancelledIdle: 'No file selected.',
@@ -84,6 +85,7 @@ function mapInspectionError(reason) {
 function mapConversionError(reason) {
   if (reason === 'busy') return COPY.busy;
   if (reason === 'profile_unavailable') return COPY.profileUnavailable;
+  if (reason === 'output_root_unsafe') return COPY.outputRootUnsafe;
   if (reason === 'verification_failed') return COPY.verificationFailed;
   if (reason === 'conversion_failed') return COPY.conversionFailed;
   return COPY.conversionFailed;

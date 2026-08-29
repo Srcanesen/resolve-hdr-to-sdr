@@ -147,9 +147,7 @@ test('inspection-adapter validateCliResponse accepts hlgSupported and both profi
   const badCls = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'bogus', reason: 'x', canConvert: false } };
   assert.equal(adapter.validateCliResponse(badCls), false);
   const mismatchProfile = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'hlgKnownLocal', reason: 'x', canConvert: true, profileId: 'hlg-rec709-v1' } };
-  // validateCliResponse only checks profile is known, not classification-profile pairing; pairing is checked in ipc-contract/convert service. So it would still be true? Let's ensure our validateCliResponse only checks allowedProfiles set, which would allow mismatch but that's okay – higher layer will reject.
-  // For now we expect it to be true because we only check allowedProfiles, not pairing
-  assert.equal(adapter.validateCliResponse(mismatchProfile), true);
+  assert.equal(adapter.validateCliResponse(mismatchProfile), false);
 });
 
 test('ipc-contract isValidResponse accepts hlgSupported and validates profile pairing', () => {
@@ -191,9 +189,12 @@ test('ipc-contract attachIpc mints token for generic HLG and preserves privacy',
   const ipcContract = require('../ipc-contract.cjs');
   const { ConversionService } = require('../conversion-service.cjs');
   const { PROFILE_ID_GENERIC } = require('../b-profile.cjs');
+  const policyTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-ipc-policy-'));
   try {
     const fakeWindow = { webContents: { id: 42, send: () => {} } };
     const svc = new ConversionService();
+    const genericPath = path.join(policyTmp, 'generic.mov');
+    fs.writeFileSync(genericPath, 'video');
     const genericResult = {
       outcome: 'complete',
       result: {
@@ -212,7 +213,7 @@ test('ipc-contract attachIpc mints token for generic HLG and preserves privacy',
     const handler = mockIpcMain._handler;
     assert.ok(handler);
     const event = { sender: fakeWindow.webContents };
-    const resp = await handler(event, { kind: 'path', path: '/tmp/generic.mov' });
+    const resp = await handler(event, { kind: 'path', path: genericPath });
     assert.equal(resp.outcome, 'complete');
     assert.equal(resp.result.classification, 'hlgSupported');
     assert.equal(resp.result.profileId, PROFILE_ID_GENERIC);
@@ -223,6 +224,11 @@ test('ipc-contract attachIpc mints token for generic HLG and preserves privacy',
     assert.ok(token);
     assert.equal(token.profileId, PROFILE_ID_GENERIC);
     assert.equal(token.sha256, 'b'.repeat(64));
+    assert.equal(token.canonicalPath, fs.realpathSync(genericPath));
+
+    // A failed canonicalization must not fall back to the submitted path or mint a token.
+    const missing = await handler(event, { kind: 'path', path: path.join(policyTmp, 'missing.mov') });
+    assert.deepEqual(missing, { outcome: 'error', reason: 'inspection_failed' });
     // PQ and DOVI should not be eligible (no token)
     const pqResult = {
       outcome: 'complete',
@@ -238,6 +244,7 @@ test('ipc-contract attachIpc mints token for generic HLG and preserves privacy',
     // Verify that inspection invalidates prior token (generic token should be gone after PQ inspection)
     assert.equal(svc.getSourceToken(resp.result.sourceId), null, 'prior generic token should be invalidated after new inspection');
   } finally {
+    fs.rmSync(policyTmp, { recursive: true, force: true });
     if (originalCache) require.cache[electronPath] = originalCache; else delete require.cache[electronPath];
     delete require.cache[require.resolve('../ipc-contract.cjs')];
     delete require.cache[require.resolve('../conversion-service.cjs')];

@@ -7,6 +7,16 @@ try { bProfile = require('./b-profile.cjs'); } catch {}
 const PROFILE_ID_LOCAL_B_FALLBACK = 'hlg-local-b-v1';
 const PROFILE_ID_GENERIC_FALLBACK = 'hlg-rec709-v1';
 const PROFILE_ID_PQ_FALLBACK = 'pq-rec709-v1';
+const STAGING_FILE_RE = /^\.[A-Za-z0-9_-]+\.partial\.mp4$/;
+const SCAVENGE_STAGING_FILE_RE = /^\.[0-9a-f]{12}\.partial\.mp4$/i;
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+function outputRootError(reason) {
+  const error = new Error(reason);
+  error.code = 'output_root_unsafe';
+  return error;
+}
 function isKnownProfile(p) {
   if (bProfile && typeof bProfile.isKnownProfileId === 'function') return bProfile.isKnownProfileId(p);
   return p === PROFILE_ID_LOCAL_B_FALLBACK || p === PROFILE_ID_GENERIC_FALLBACK || p === PROFILE_ID_PQ_FALLBACK;
@@ -16,37 +26,96 @@ function getOutputRoot() {
   return path.join(os.homedir(), 'Movies', 'HdrToSdr');
 }
 
+function _strictOutputRoot(outputRoot) {
+  if (!outputRoot || typeof outputRoot !== 'string' || !path.isAbsolute(outputRoot)) return null;
+  try {
+    const resolved = path.resolve(outputRoot);
+    const lst = fs.lstatSync(resolved);
+    if (lst.isSymbolicLink() || !lst.isDirectory()) return null;
+    const real = fs.realpathSync(resolved);
+    // macOS exposes /tmp and /var through system aliases; do not mistake those
+    // harmless aliases for an application-controlled symlink escape.
+    const alias = resolved
+      .replace(/^\/tmp(?=\/|$)/, '/private/tmp')
+      .replace(/^\/var(?=\/|$)/, '/private/var')
+      .replace(/^\/etc(?=\/|$)/, '/private/etc');
+    return real === resolved || real === alias ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+// Remove only bounded, generated staging names directly under a strict output root.
+// This is deliberately conservative: unknown files and symlinks are left in place.
+function scavengeStagingFiles(outputRoot, maxFiles = 100) {
+  const root = _strictOutputRoot(outputRoot);
+  if (!root) return { removed: 0, failed: 0 };
+  let entries;
+  try { entries = fs.readdirSync(root); } catch { return { removed: 0, failed: 0 }; }
+  let removed = 0;
+  let failed = 0;
+  let inspected = 0;
+  for (const name of entries) {
+    if (inspected >= maxFiles) break;
+    if (!SCAVENGE_STAGING_FILE_RE.test(name)) continue;
+    inspected++;
+    const candidate = path.join(root, name);
+    try {
+      const lst = fs.lstatSync(candidate);
+      if (lst.isSymbolicLink() || !lst.isFile()) continue;
+      fs.unlinkSync(candidate);
+      removed++;
+    } catch {
+      failed++;
+      console.warn('[HdrToSdr] staging cleanup warning');
+    }
+  }
+  return { removed, failed };
+}
+
 function ensureOutputRoot() {
   const root = getOutputRoot();
   const home = os.homedir();
-  // Only harden components under homedir (Movies, HdrToSdr), not system prefixes like /tmp -> /private/tmp
+  // Only harden components under homedir (Movies, HdrToSdr), not system prefixes like /tmp -> /private/tmp.
   const moviesDir = path.join(home, 'Movies');
   const dirsToEnsure = [moviesDir, root];
   for (const dir of dirsToEnsure) {
     try {
       const lst = fs.lstatSync(dir);
-      if (lst.isSymbolicLink()) throw new Error('symlink component');
-      if (!lst.isDirectory()) throw new Error('not directory');
+      if (lst.isSymbolicLink()) throw outputRootError('output root symlink');
+      if (!lst.isDirectory()) throw outputRootError('output root not directory');
     } catch (e) {
       if (e && e.code === 'ENOENT') {
-        fs.mkdirSync(dir, { mode: 0o755 });
-        const lst2 = fs.lstatSync(dir);
-        if (lst2.isSymbolicLink() || !lst2.isDirectory()) throw new Error('invalid dir after creation');
+        try { fs.mkdirSync(dir, { mode: PRIVATE_DIRECTORY_MODE }); } catch { throw outputRootError('output root create failed'); }
+        let lst2;
+        try { lst2 = fs.lstatSync(dir); } catch { throw outputRootError('output root create failed'); }
+        if (lst2.isSymbolicLink() || !lst2.isDirectory()) throw outputRootError('output root create failed');
       } else {
-        throw e;
+        throw e && e.code === 'output_root_unsafe' ? e : outputRootError('output root unavailable');
       }
     }
   }
-  const canonical = fs.realpathSync(root);
+  let canonical;
+  try { canonical = fs.realpathSync(root); } catch { throw outputRootError('output root unavailable'); }
   const expected = path.resolve(root);
   if (canonical !== expected) {
     const realHome = (() => { try { return fs.realpathSync(home); } catch { return path.resolve(home); } })();
     const suffix = path.join('Movies', 'HdrToSdr');
     const expectedCanonical = path.join(realHome, suffix);
-    if (canonical !== expectedCanonical && canonical !== expected) {
-      throw new Error('output root symlink escape');
-    }
+    if (canonical !== expectedCanonical && canonical !== expected) throw outputRootError('output root symlink escape');
   }
+  try {
+    fs.chmodSync(canonical, PRIVATE_DIRECTORY_MODE);
+    const rootStat = fs.lstatSync(canonical);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw outputRootError('output root unavailable');
+    if (process.platform !== 'win32' && (rootStat.mode & 0o777) !== PRIVATE_DIRECTORY_MODE) {
+      throw outputRootError('output root permissions unavailable');
+    }
+  } catch (e) {
+    throw e && e.code === 'output_root_unsafe' ? e : outputRootError('output root permissions unavailable');
+  }
+  // Clear only abandoned, generated staging files left by an interrupted job.
+  scavengeStagingFiles(canonical);
   return canonical;
 }
 function isPathUnderRoot(canonicalRoot, candidate) {
@@ -71,16 +140,31 @@ function isPathUnderRoot(canonicalRoot, candidate) {
 }
 
 function sanitizeBasename(name) {
-  // Take basename without extension, keep alphanumeric, dot, hyphen, underscore
-  const base = path.basename(name);
-  const withoutExt = base.replace(/\.[^.]+$/, '');
-  // replace disallowed chars with underscore, trim
-  let s = withoutExt.replace(/[^A-Za-z0-9._-]/g, '_');
-  s = s.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
-  if (!s) s = 'output';
-  // limit length to 80
-  if (s.length > 80) s = s.slice(0, 80);
-  return s;
+  // Normalize first so compatibility characters cannot reintroduce separators;
+  // preserve ordinary Unicode letters, marks, numbers, and emoji for readable names.
+  let normalized;
+  try { normalized = String(name || '').normalize('NFKC'); } catch { normalized = ''; }
+  const base = path.basename(normalized.replace(/[\\/]/g, '/'));
+  const withoutExt = base.replace(/\.[^.]+$/u, '');
+  let s = '';
+  for (const character of withoutExt) {
+    const asciiUnsafe = /[\x00-\x7f]/u.test(character) && !/[A-Za-z0-9._-]/u.test(character);
+    const unicodePunctuation = /[\p{P}]/u.test(character) && !/[._-]/u.test(character);
+    if (/[\p{Cc}\p{Cf}\p{Cs}]/u.test(character) || /\s/u.test(character)
+      || asciiUnsafe || unicodePunctuation) s += '_';
+    else s += character;
+  }
+  s = s.replace(/_+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '');
+  if (!s || /^[.]+$/u.test(s)) s = 'output';
+  // Bound UTF-8 bytes rather than UTF-16 code units; this is safe for APFS and
+  // keeps the suffix added by buildDisplayName well below filesystem limits.
+  let bounded = '';
+  for (const character of s) {
+    const next = bounded + character;
+    if (Buffer.byteLength(next, 'utf8') > 80) break;
+    bounded = next;
+  }
+  return bounded || 'output';
 }
 
 function buildDisplayName(sourceBasename, profileId) {
@@ -93,8 +177,8 @@ function buildDisplayName(sourceBasename, profileId) {
 }
 
 function allocateUniqueFinalPath(outputRoot, displayName) {
-  let canonicalRoot;
-  try { canonicalRoot = fs.realpathSync(outputRoot); } catch { canonicalRoot = path.resolve(outputRoot); }
+  const canonicalRoot = _strictOutputRoot(outputRoot);
+  if (!canonicalRoot) throw outputRootError('output root unavailable');
   const candidate = path.join(outputRoot, path.basename(displayName));
   if (!isPathUnderRoot(canonicalRoot, candidate)) throw new Error('path escape');
   if (!fs.existsSync(candidate)) {
@@ -124,8 +208,8 @@ function allocateUniqueFinalPath(outputRoot, displayName) {
 }
 
 function getStagingPath(outputRoot, finalPath) {
-  let canonicalRoot;
-  try { canonicalRoot = fs.realpathSync(outputRoot); } catch { canonicalRoot = path.resolve(outputRoot); }
+  const canonicalRoot = _strictOutputRoot(outputRoot);
+  if (!canonicalRoot) throw outputRootError('output root unavailable');
   const dir = path.dirname(path.resolve(finalPath));
   if (!isPathUnderRoot(canonicalRoot, dir) && path.resolve(dir) !== path.resolve(canonicalRoot)) {
     // Also allow dir that is realpath-equivalent
@@ -151,12 +235,44 @@ function getStagingPath(outputRoot, finalPath) {
   return fallback;
 }
 
-function removeStaging(stagingPath) {
+function hardenFileMode(filePath) {
   try {
-    if (stagingPath && fs.existsSync(stagingPath)) {
-      fs.unlinkSync(stagingPath);
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw outputRootError('staging file invalid');
+    fs.chmodSync(filePath, PRIVATE_FILE_MODE);
+    const hardened = fs.lstatSync(filePath);
+    if (process.platform !== 'win32' && (hardened.mode & 0o777) !== PRIVATE_FILE_MODE) {
+      throw outputRootError('staging file permissions unavailable');
     }
-  } catch {}
+    return true;
+  } catch (error) {
+    if (error && error.code === 'output_root_unsafe') throw error;
+    throw outputRootError('staging file permissions unavailable');
+  }
+}
+
+function removeStaging(stagingPath, outputRoot) {
+  const fail = (scavengeRoot = null) => {
+    console.warn('[HdrToSdr] staging cleanup warning');
+    const scavenged = scavengeRoot ? scavengeStagingFiles(scavengeRoot) : { removed: 0, failed: 0 };
+    return { ok: false, warning: 'staging_cleanup_failed', reported: true, scavenged };
+  };
+  if (typeof stagingPath !== 'string' || !path.isAbsolute(stagingPath)
+      || !STAGING_FILE_RE.test(path.basename(stagingPath))) return fail();
+  const root = outputRoot || path.dirname(stagingPath);
+  const strictRoot = _strictOutputRoot(root);
+  let stagingParent;
+  try { stagingParent = fs.realpathSync(path.dirname(path.resolve(stagingPath))); } catch { stagingParent = null; }
+  if (!strictRoot || stagingParent !== strictRoot) return fail();
+  try {
+    const lst = fs.lstatSync(stagingPath);
+    if (lst.isSymbolicLink() || !lst.isFile()) return fail();
+    fs.unlinkSync(stagingPath);
+    return { ok: true, removed: true };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { ok: true, removed: false };
+    return fail(strictRoot);
+  }
 }
 
 // Non-creating helper usable by drag revalidation: validates strict containment, no symlink components, TOCTOU-safe checks.
@@ -260,11 +376,15 @@ function getCanonicalOutputRootNoCreate() {
 module.exports = {
   getOutputRoot,
   ensureOutputRoot,
+  PRIVATE_DIRECTORY_MODE,
+  PRIVATE_FILE_MODE,
   sanitizeBasename,
   buildDisplayName,
   allocateUniqueFinalPath,
   getStagingPath,
   removeStaging,
+  hardenFileMode,
+  scavengeStagingFiles,
   isSafeOutputFile,
   getCanonicalOutputRootNoCreate,
   isPathUnderRoot,

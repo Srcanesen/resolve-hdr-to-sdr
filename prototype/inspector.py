@@ -10,6 +10,30 @@ from .path_boundary import get_sample_root, validate_local_path, validate_user_s
 
 
 _UNKNOWN_COLOR_VALUES = {"", "unknown", "unspecified", "2"}
+FFPROBE_TIMEOUT_SECONDS = 15
+
+
+def _strict_flag(value) -> bool:
+    """Parse ffprobe's 0/1 flags without treating arbitrary strings as truthy."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value in {"0", "1"}:
+        return value == "1"
+    raise ValueError("invalid_boolean_flag")
+
+
+def _strict_int(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("invalid_integer")
+    return value
+
+
+def _optional_strict_int(mapping: dict, key: str):
+    if key not in mapping or mapping[key] is None:
+        return None
+    return _strict_int(mapping[key])
 
 
 def _normalize_probe_value(value) -> Optional[str]:
@@ -87,7 +111,7 @@ def _sanitize_display_name(name: str) -> str:
 def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha256: str) -> InspectionEvidence:
     try:
         data = json.loads(stdout_bytes.decode("utf-8"))
-    except Exception as e:
+    except Exception:
         return InspectionEvidence(
             sha256=sha256,
             size=size,
@@ -97,17 +121,37 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
         )
 
     try:
-        streams = data.get("streams", [])
+        if not isinstance(data, dict):
+            raise ValueError("probe_root_not_object")
+        streams = data.get("streams")
         fmt = data.get("format", {})
+        if not isinstance(streams, list) or not isinstance(fmt, dict):
+            raise ValueError("probe_shape_invalid")
 
-        # Find video stream (first video)
-        vstream = None
-        for s in streams:
-            if s.get("codec_type") == "video":
-                vstream = s
-                break
+        # A cover/attached picture is a video stream too, but is not the source video.
+        candidates = []
+        for position, stream in enumerate(streams):
+            if not isinstance(stream, dict):
+                raise ValueError("stream_shape_invalid")
+            if stream.get("codec_type") != "video":
+                continue
+            disposition = stream.get("disposition", {})
+            if disposition is None:
+                disposition = {}
+            if not isinstance(disposition, dict):
+                raise ValueError("disposition_shape_invalid")
+            attached = False
+            if "attached_pic" in disposition:
+                attached = _strict_flag(disposition["attached_pic"])
+            is_default = False
+            if "default" in disposition:
+                is_default = _strict_flag(disposition["default"])
+            candidates.append((position, stream, attached, is_default))
 
-        if vstream is None:
+        selected = next((item for item in candidates if not item[2] and item[3]), None)
+        if selected is None:
+            selected = next((item for item in candidates if not item[2]), None)
+        if selected is None:
             return InspectionEvidence(
                 sha256=sha256,
                 size=size,
@@ -115,6 +159,11 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
                 parse_ok=False,
                 parse_error="no_video_stream",
             )
+        position, vstream, _, _ = selected
+        stream_index = vstream.get("index", position)
+        if stream_index is None:
+            stream_index = position
+        stream_index = _strict_int(stream_index)
 
         codec_name = vstream.get("codec_name")
         codec_tag = vstream.get("codec_tag_string")
@@ -129,99 +178,102 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
         duration = vstream.get("duration") or fmt.get("duration")
         r_frame_rate = vstream.get("r_frame_rate")
         avg_frame_rate = vstream.get("avg_frame_rate")
+        level = _optional_strict_int(vstream, "level")
 
-        # DOVI side data
         has_dovi = False
         has_hdr10plus = False
-        dv_profile = None
-        dv_level = None
-        dv_compat_id = None
-        rpu_present = None
-        el_present = None
-        bl_present = None
         has_mdcv = False
         has_clli = False
+        dovi_values = {}
+        metadata_conflict = False
 
-        side_list = vstream.get("side_data_list", []) or []
-        for sd in side_list:
-            t = sd.get("side_data_type", "")
-            tl = t.lower()
-            if "dovi" in tl or "dolby" in tl:
+        def merge_dovi_value(key, value):
+            nonlocal metadata_conflict
+            if value is None:
+                return
+            if key in dovi_values and dovi_values[key] != value:
+                metadata_conflict = True
+            else:
+                dovi_values[key] = value
+
+        def inspect_side_data(side_data):
+            nonlocal has_dovi, has_hdr10plus, has_mdcv, has_clli
+            if not isinstance(side_data, dict):
+                raise ValueError("side_data_shape_invalid")
+            side_type = side_data.get("side_data_type", "")
+            if not isinstance(side_type, str):
+                raise ValueError("side_data_type_invalid")
+            side_type_lower = side_type.lower()
+            if "dovi" in side_type_lower or "dolby" in side_type_lower:
                 has_dovi = True
-                dv_profile = sd.get("dv_profile")
-                dv_level = sd.get("dv_level")
-                dv_compat_id = sd.get("dv_bl_signal_compatibility_id")
-                # also fields rpu_present_flag etc
-                if "rpu_present_flag" in sd:
-                    rpu_present = bool(sd.get("rpu_present_flag"))
-                if "el_present_flag" in sd:
-                    el_present = bool(sd.get("el_present_flag"))
-                if "bl_present_flag" in sd:
-                    bl_present = bool(sd.get("bl_present_flag"))
-            # HDR10+ dynamic metadata must be detected separately from Dolby
-            if "hdr10plus" in tl or "hdr10_plus" in tl or "hdr10+" in tl or "st2094-40" in tl or "st2094-10" in tl or "st2094" in tl:
-                # Ensure not misclassifying dolby already captured; still set independently
+                for field in ("dv_profile", "dv_level", "dv_bl_signal_compatibility_id"):
+                    if field in side_data:
+                        merge_dovi_value(field, _optional_strict_int(side_data, field))
+                for field in ("rpu_present_flag", "el_present_flag", "bl_present_flag"):
+                    if field in side_data:
+                        merge_dovi_value(field, _strict_flag(side_data[field]))
+            if (
+                "hdr10plus" in side_type_lower
+                or "hdr10_plus" in side_type_lower
+                or "hdr10+" in side_type_lower
+                or "st2094-40" in side_type_lower
+                or "st2094-10" in side_type_lower
+                or "st2094" in side_type_lower
+            ):
                 has_hdr10plus = True
-            if "mastering display" in tl or "mdcv" in tl:
+            if "mastering display" in side_type_lower or "mdcv" in side_type_lower:
                 has_mdcv = True
-            if "content light" in tl or "clli" in tl:
-                has_clli = True
-            # also mdcv/clli can appear as separate strings
-            if tl == "mdcv" or "mdcv" in tl:
-                has_mdcv = True
-            if tl == "clli" or "clli" in tl:
+            if "content light" in side_type_lower or "clli" in side_type_lower:
                 has_clli = True
 
-        # Bounded first decoded frame side data (supplements stream side_data_list)
-        # Local ffprobe exposes MDCV/CLLI on first frame even when stream side_data_list is absent
-        frames = data.get("frames", []) or []
-        for fr in frames:
-            # ffprobe may expose side_data as side_data_list or side_data
-            f_side = fr.get("side_data_list", None)
-            if f_side is None:
-                f_side = fr.get("side_data", []) or []
-            if not isinstance(f_side, list):
-                continue
-            for sd in f_side:
-                if not isinstance(sd, dict):
+        def inspect_side_data_list(side_list):
+            if side_list is None:
+                return
+            if not isinstance(side_list, list):
+                raise ValueError("side_data_list_invalid")
+            for side_data in side_list:
+                inspect_side_data(side_data)
+
+        inspect_side_data_list(vstream.get("side_data_list", []))
+
+        # Keep frame evidence only for the selected real video stream. A frame from
+        # an audio or attached-picture stream must not influence classification.
+        frames = data.get("frames", [])
+        if frames is None:
+            frames = []
+        if not isinstance(frames, list):
+            raise ValueError("frames_shape_invalid")
+        for frame in frames:
+            if not isinstance(frame, dict):
+                raise ValueError("frame_shape_invalid")
+            if "stream_index" in frame:
+                frame_index = _strict_int(frame["stream_index"])
+                if frame_index != stream_index:
                     continue
-                t = sd.get("side_data_type", "")
-                tl = str(t).lower()
-                if "dovi" in tl or "dolby" in tl:
-                    has_dovi = True
-                    # Capture rpu flags if present on frame as well
-                    if dv_profile is None and "dv_profile" in sd:
-                        dv_profile = sd.get("dv_profile")
-                    if dv_level is None and "dv_level" in sd:
-                        dv_level = sd.get("dv_level")
-                    if dv_compat_id is None and "dv_bl_signal_compatibility_id" in sd:
-                        dv_compat_id = sd.get("dv_bl_signal_compatibility_id")
-                if "hdr10plus" in tl or "hdr10_plus" in tl or "hdr10+" in tl or "st2094-40" in tl or "st2094-10" in tl or "st2094" in tl:
-                    has_hdr10plus = True
-                if "mastering display" in tl or "mdcv" in tl:
-                    has_mdcv = True
-                if "content light" in tl or "clli" in tl:
-                    has_clli = True
-                if tl == "mdcv" or "mdcv" in tl:
-                    has_mdcv = True
-                if tl == "clli" or "clli" in tl:
-                    has_clli = True
+            elif sum(1 for item in candidates if not item[2]) != 1:
+                # Without a stream index, metadata from a multi-video probe is
+                # ambiguous and must not influence the selected source stream.
+                continue
+            if "media_type" in frame:
+                media_type = frame["media_type"]
+                if not isinstance(media_type, str):
+                    raise ValueError("frame_media_type_invalid")
+                if media_type.lower() != "video":
+                    continue
+            frame_side_data = frame.get("side_data_list")
+            if frame_side_data is None:
+                frame_side_data = frame.get("side_data", [])
+            inspect_side_data_list(frame_side_data)
 
-        # Also check for unspecified (2)
-        is_unspecified = False
-        # color_primaries/transfer/space values from ffprobe string may be "unknown" or color values numeric?
-        # Check for "unknown" or "unspecified" string or numeric 2
-        for val in (color_space, color_transfer, color_primaries):
-            normalized = _normalize_probe_value(val)
-            if normalized in _UNKNOWN_COLOR_VALUES:
-                is_unspecified = True
-        # Only semantic contradictions visible in these stream fields are flagged.
-        # ffprobe does not expose a reliable container-vs-bitstream comparison here.
-        is_contradictory = _has_semantic_color_contradiction(
+        is_unspecified = any(
+            _normalize_probe_value(value) in _UNKNOWN_COLOR_VALUES
+            for value in (color_space, color_transfer, color_primaries)
+        )
+        is_contradictory = metadata_conflict or _has_semantic_color_contradiction(
             color_transfer, color_space, color_primaries
         )
 
-        ev = InspectionEvidence(
+        return InspectionEvidence(
             sha256=sha256,
             size=size,
             display_name=display_name,
@@ -238,12 +290,13 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
             duration=str(duration) if duration is not None else None,
             r_frame_rate=r_frame_rate,
             avg_frame_rate=avg_frame_rate,
-            dv_profile=dv_profile,
-            dv_level=dv_level,
-            dv_compat_id=dv_compat_id,
-            rpu_present=rpu_present,
-            el_present=el_present,
-            bl_present=bl_present,
+            level=level,
+            dv_profile=dovi_values.get("dv_profile"),
+            dv_level=dovi_values.get("dv_level"),
+            dv_compat_id=dovi_values.get("dv_bl_signal_compatibility_id"),
+            rpu_present=dovi_values.get("rpu_present_flag"),
+            el_present=dovi_values.get("el_present_flag"),
+            bl_present=dovi_values.get("bl_present_flag"),
             has_dovi=has_dovi,
             has_hdr10plus=has_hdr10plus,
             has_mdcv=has_mdcv,
@@ -252,7 +305,6 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
             is_contradictory=is_contradictory,
             parse_ok=True,
         )
-        return ev
     except Exception:
         return InspectionEvidence(
             sha256=sha256,
@@ -263,18 +315,27 @@ def _parse_ffprobe_json(stdout_bytes: bytes, display_name: str, size: int, sha25
         )
 
 
+def _same_identity(before, after) -> bool:
+    return (
+        after.st_size == before.st_size
+        and after.st_ino == before.st_ino
+        and after.st_dev == before.st_dev
+        and after.st_mtime_ns == before.st_mtime_ns
+    )
+
+
 def _inspect_canonical(canonical: Path, repo_root: Path) -> Tuple[Optional[InspectionEvidence], Optional[str]]:
-    """Internal helper: hash, ffprobe, identity recheck, parse. No path policy."""
+    """Hash once, probe a bounded interval, and detect changes using file identity."""
     try:
         st_before = os.stat(canonical)
         size_before = st_before.st_size
-        ino_before = st_before.st_ino
-        dev_before = st_before.st_dev
-        mtime_before = st_before.st_mtime_ns
     except OSError:
         return None, "stat_failed"
     try:
         sha = sha256_file(canonical)
+        # This catches a write occurring while the single hash was being read.
+        if not _same_identity(st_before, os.stat(canonical)):
+            return None, "identity_changed"
     except OSError:
         return None, "hash_failed"
     try:
@@ -283,13 +344,21 @@ def _inspect_canonical(canonical: Path, repo_root: Path) -> Tuple[Optional[Inspe
         return None, "ffprobe_missing"
     try:
         result = subprocess.run(
-            [str(ffprobe), "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-read_intervals", "%+#1", "-show_frames", str(canonical)],
+            [
+                str(ffprobe), "-v", "quiet", "-print_format", "json",
+                "-select_streams", "v", "-show_format", "-show_streams", "-show_frames",
+                # One second from the beginning is bounded by time and does not
+                # accidentally select an audio packet as a packet-count probe can do.
+                "-read_intervals", "0%+1", str(canonical),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=15,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
             shell=False,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        return None, "ffprobe_timeout"
     except Exception:
         return None, "ffprobe_exec_failed"
     if result.returncode != 0:
@@ -297,11 +366,7 @@ def _inspect_canonical(canonical: Path, repo_root: Path) -> Tuple[Optional[Inspe
     if not result.stdout or len(result.stdout) == 0:
         return None, "ffprobe_empty"
     try:
-        st_after = os.stat(canonical)
-        if st_after.st_size != size_before or st_after.st_ino != ino_before or st_after.st_dev != dev_before or st_after.st_mtime_ns != mtime_before:
-            return None, "identity_changed"
-        sha_after = sha256_file(canonical)
-        if sha_after != sha:
+        if not _same_identity(st_before, os.stat(canonical)):
             return None, "identity_changed"
     except OSError:
         return None, "stat_failed"
@@ -356,18 +421,25 @@ def inspect_upload_bytes(data: bytes, filename_hint: str) -> Tuple[Optional[Insp
     return None, "not_implemented_for_bytes", Path()
 
 
-def inspect_temp_file(temp_path: Path, display_name_hint: str, repo_root: Path) -> Tuple[Optional[InspectionEvidence], Optional[str]]:
-    """Inspect a temp file containing upload bytes. Caller ensures file 0600 in 0700 dir."""
+def inspect_temp_file(
+    temp_path: Path,
+    display_name_hint: str,
+    repo_root: Path,
+    precomputed_sha256: Optional[str] = None,
+) -> Tuple[Optional[InspectionEvidence], Optional[str]]:
+    """Inspect a private upload, reusing the hash made while the request was written."""
     try:
-        st = os.stat(temp_path)
-        size = st.st_size
+        st_before = os.stat(temp_path)
+        size = st_before.st_size
         if size == 0:
             return None, "empty"
     except OSError:
         return None, "stat_failed"
 
     try:
-        sha = sha256_file(temp_path)
+        sha = precomputed_sha256 if precomputed_sha256 is not None else sha256_file(temp_path)
+        if not _same_identity(st_before, os.stat(temp_path)):
+            return None, "identity_changed"
     except OSError:
         return None, "hash_failed"
 
@@ -378,13 +450,19 @@ def inspect_temp_file(temp_path: Path, display_name_hint: str, repo_root: Path) 
 
     try:
         result = subprocess.run(
-            [str(ffprobe), "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-read_intervals", "%+#1", "-show_frames", str(temp_path)],
+            [
+                str(ffprobe), "-v", "quiet", "-print_format", "json",
+                "-select_streams", "v", "-show_format", "-show_streams", "-show_frames",
+                "-read_intervals", "0%+1", str(temp_path),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=15,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
             shell=False,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        return None, "ffprobe_timeout"
     except Exception:
         return None, "ffprobe_exec_failed"
 
@@ -392,6 +470,11 @@ def inspect_temp_file(temp_path: Path, display_name_hint: str, repo_root: Path) 
         return None, "ffprobe_nonzero"
     if not result.stdout:
         return None, "ffprobe_empty"
+    try:
+        if not _same_identity(st_before, os.stat(temp_path)):
+            return None, "identity_changed"
+    except OSError:
+        return None, "stat_failed"
 
     display_name = _sanitize_display_name(display_name_hint)
     ev = _parse_ffprobe_json(result.stdout, display_name, size, sha)

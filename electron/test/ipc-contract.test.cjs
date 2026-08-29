@@ -34,7 +34,7 @@ test('isValidRequest rejects non-string path', () => {
 });
 
 test('isValidResponse accepts complete', () => {
-  const resp = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true } };
+  const resp = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1' } };
   assert.equal(isValidResponse(resp), true);
 });
 
@@ -44,6 +44,8 @@ test('isValidResponse accepts error', () => {
 
 test('isValidResponse accepts cancelled', () => {
   assert.equal(isValidResponse({ outcome: 'cancelled', reason: 'no_selection' }), true);
+  assert.equal(isValidResponse({ outcome: 'cancelled', reason: '/tmp/secret.mov' }), false);
+  assert.equal(isValidResponse({ outcome: 'error', reason: '/tmp/secret.mov' }), false);
 });
 
 test('isValidResponse rejects invalid classification', () => {
@@ -117,6 +119,65 @@ test('validateCliResponse privacy shape', () => {
   assert.equal(adapter.validateCliResponse(withRawPath), false);
   const badCls = { outcome: 'complete', result: { classification: 'bad', reason: 'x', canConvert: false } };
   assert.equal(adapter.validateCliResponse(badCls), false);
+  assert.equal(adapter.validateCliResponse({ outcome: 'complete', result: { classification: 'uncertain', reason: 'x', canConvert: false } }), false);
+});
+
+test('inspection response schema rejects malformed nested fields and non-canonical tokens', () => {
+  const good = { outcome: 'complete', result: {
+    displayName: 'clip.mov', size: 1, sha256: 'a'.repeat(64),
+    classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true,
+    profileId: 'hlg-rec709-v1', sourceId: '550e8400-e29b-41d4-a716-446655440000',
+    color: { colorTransfer: 'arib-std-b67' },
+    dovi: { hasDovi: false, hasMdcv: false, hasClli: false },
+  } };
+  assert.equal(isValidResponse(good), true);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, size: '1' } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, sha256: 'not-a-hash' } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, canConvert: 'true' } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, color: [] } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, dovi: { hasDovi: 'false' } } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, sourceId: '/tmp/source.mov' } }), false);
+  assert.equal(isValidResponse({ ...good, result: { ...good.result, profileId: 'hlg-local-b-v1' } }), false);
+  assert.equal(isValidResponse({ outcome: 'complete', result: { classification: 'uncertain', reason: 'x', canConvert: false, sourceId: good.result.sourceId } }), false);
+});
+
+test('shared source policy canonicalizes safe files and rejects all non-system symlinks', () => {
+  const { canonicalizeSafeSourcePath } = require('../source-path-policy.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-policy-'));
+  try {
+    const realDir = path.join(root, 'real');
+    const linkDir = path.join(root, 'link');
+    fs.mkdirSync(realDir);
+    const source = path.join(realDir, 'source.mov');
+    fs.writeFileSync(source, 'video');
+    fs.symlinkSync(realDir, linkDir, 'dir');
+    assert.deepEqual(canonicalizeSafeSourcePath(source).canonical, fs.realpathSync(source));
+    assert.equal(canonicalizeSafeSourcePath(path.join(linkDir, 'source.mov')).ok, false);
+    const finalLink = path.join(root, 'final.mov');
+    fs.symlinkSync(source, finalLink);
+    assert.equal(canonicalizeSafeSourcePath(finalLink).ok, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('inspection adapter enforces an injected finite timeout', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-timeout-'));
+  const python = path.join(tmp, 'slow-python');
+  fs.writeFileSync(python, '#!/bin/sh\nsleep 2\n');
+  fs.chmodSync(python, 0o755);
+  const previousPython = process.env.HDRTOSDR_PYTHON;
+  process.env.HDRTOSDR_PYTHON = python;
+  const started = Date.now();
+  try {
+    const result = await adapter.inspect('/tmp/source.mov', { timeoutMs: 40, stallTimeoutMs: 1000 });
+    assert.deepEqual(result, { outcome: 'error', reason: 'inspection_failed' });
+    assert.ok(Date.now() - started < 1000, 'inspection must settle within its timeout');
+  } finally {
+    if (previousPython === undefined) delete process.env.HDRTOSDR_PYTHON;
+    else process.env.HDRTOSDR_PYTHON = previousPython;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('getRepoRoot resolves to existing directory containing prototype', () => {

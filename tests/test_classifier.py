@@ -22,6 +22,7 @@ def make_hlg_evidence(sha=HASH1, size=SIZE1):
         color_primaries=EXPECTED_HLG["color_primaries"],
         color_range=EXPECTED_HLG["color_range"],
         chroma_location="left",
+        level=EXPECTED_HLG["level"],
         dv_profile=EXPECTED_HLG["dv_profile"],
         dv_level=4,
         dv_compat_id=EXPECTED_HLG["dv_compat_id"],
@@ -74,6 +75,20 @@ class TestClassifier(unittest.TestCase):
         self.assertEqual(res.classification, Classification.uncertain)
         self.assertFalse(res.can_convert)
         self.assertEqual(res.reason, "allowlist_evidence_mismatch")
+
+    def test_hlg_level_must_match_exactly(self):
+        ev = make_hlg_evidence()
+        ev.level = EXPECTED_HLG["level"] - 1
+        result = classify(ev)
+        self.assertEqual(result.classification, Classification.uncertain)
+        self.assertFalse(result.can_convert)
+
+    def test_hlg_level_is_required(self):
+        ev = make_hlg_evidence()
+        ev.level = None
+        result = classify(ev)
+        self.assertEqual(result.classification, Classification.uncertain)
+        self.assertFalse(result.can_convert)
 
     def test_pq_detected(self):
         # Positive static HDR10 now is pqSupported (narrow gate)

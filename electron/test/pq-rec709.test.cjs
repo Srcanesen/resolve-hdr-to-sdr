@@ -28,7 +28,7 @@ test('b-profile pq-rec709-v1 frozen graph and distinct ID', () => {
 });
 
 // b-executor capability for PQ requires bt.2390, perceptual, peak_detect
-test('b-executor checkCapability for pq requires bt.2390, perceptual, peak_detect', () => {
+test('b-executor checkCapability for pq requires bt.2390, perceptual, peak_detect', async () => {
   const bExecutor = require('../b-executor.cjs');
   const { PROFILE_ID_PQ, PROFILE_ID_GENERIC, PROFILE_ID_LOCAL_B } = require('../b-profile.cjs');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-pq-cap-'));
@@ -61,22 +61,22 @@ test('b-executor checkCapability for pq requires bt.2390, perceptual, peak_detec
     const common = ['Filter libplacebo', 'tonemapping', 'gamut_mode', 'perceptual', 'bt.2390', 'peak_detect'];
     const genericOnly = makeFake('generic-only', ['Filter libplacebo', 'tonemapping', 'gamut_mode', 'perceptual', 'bt.2390']);
     // PQ should fail because missing peak_detect
-    const resPqOnGeneric = bExecutor.checkCapability(genericOnly, PROFILE_ID_PQ);
+    const resPqOnGeneric = await bExecutor.checkCapability(genericOnly, PROFILE_ID_PQ);
     assert.equal(resPqOnGeneric.ok, false);
     assert.equal(resPqOnGeneric.reason, 'profile_unavailable');
     // Generic should still pass
-    const resGeneric = bExecutor.checkCapability(genericOnly, PROFILE_ID_GENERIC);
+    const resGeneric = await bExecutor.checkCapability(genericOnly, PROFILE_ID_GENERIC);
     assert.equal(resGeneric.ok, true);
     // Full PQ capable
     const pqFull = makeFake('pq-full', common);
-    assert.equal(bExecutor.checkCapability(pqFull, PROFILE_ID_PQ).ok, true);
-    assert.equal(bExecutor.checkCapability(pqFull, PROFILE_ID_GENERIC).ok, true);
+    assert.equal((await bExecutor.checkCapability(pqFull, PROFILE_ID_PQ)).ok, true);
+    assert.equal((await bExecutor.checkCapability(pqFull, PROFILE_ID_GENERIC)).ok, true);
     // Missing bt.2390
     const noBt2390 = makeFake('no-bt2390', ['Filter libplacebo', 'tonemapping', 'gamut_mode', 'perceptual', 'peak_detect']);
-    assert.equal(bExecutor.checkCapability(noBt2390, PROFILE_ID_PQ).ok, false);
+    assert.equal((await bExecutor.checkCapability(noBt2390, PROFILE_ID_PQ)).ok, false);
     // Unknown profile fails before probe
-    assert.equal(bExecutor.checkCapability(pqFull, 'unknown-profile').ok, false);
-    assert.equal(bExecutor.checkCapability(pqFull, 'unknown-profile').reason, 'profile_unavailable');
+    assert.equal((await bExecutor.checkCapability(pqFull, 'unknown-profile')).ok, false);
+    assert.equal((await bExecutor.checkCapability(pqFull, 'unknown-profile')).reason, 'profile_unavailable');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -184,9 +184,12 @@ test('ipc-contract attachIpc mints token for pqSupported', async () => {
   const ipcContract = require('../ipc-contract.cjs');
   const { ConversionService } = require('../conversion-service.cjs');
   const { PROFILE_ID_PQ } = require('../b-profile.cjs');
+  const policyTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-ipc-pq-policy-'));
   try {
     const fakeWindow = { webContents: { id: 99, send: () => {} } };
     const svc = new ConversionService();
+    const pqPath = path.join(policyTmp, 'pq.mov');
+    fs.writeFileSync(pqPath, 'video');
     const pqResult = {
       outcome: 'complete',
       result: {
@@ -205,7 +208,7 @@ test('ipc-contract attachIpc mints token for pqSupported', async () => {
     const handler = mockIpcMain._handler;
     assert.ok(handler);
     const event = { sender: fakeWindow.webContents };
-    const resp = await handler(event, { kind: 'path', path: '/tmp/pq.mov' });
+    const resp = await handler(event, { kind: 'path', path: pqPath });
     assert.equal(resp.outcome, 'complete');
     assert.equal(resp.result.classification, 'pqSupported');
     assert.equal(resp.result.profileId, PROFILE_ID_PQ);
@@ -227,6 +230,7 @@ test('ipc-contract attachIpc mints token for pqSupported', async () => {
     // prior token invalidated
     assert.equal(svc.getSourceToken(resp.result.sourceId), null);
   } finally {
+    fs.rmSync(policyTmp, { recursive: true, force: true });
     if (originalCache) require.cache[electronPath] = originalCache; else delete require.cache[electronPath];
     delete require.cache[require.resolve('../ipc-contract.cjs')];
     delete require.cache[require.resolve('../conversion-service.cjs')];

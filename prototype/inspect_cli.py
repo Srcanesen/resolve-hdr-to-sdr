@@ -59,7 +59,7 @@ def main():
     if not isinstance(obj, dict):
         _error("invalid_request")
         return
-    if obj.get("version") != 1:
+    if isinstance(obj.get("version"), bool) or obj.get("version") != 1:
         _error("invalid_request")
         return
     path_val = obj.get("path")

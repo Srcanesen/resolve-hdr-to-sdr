@@ -1,6 +1,8 @@
 const path = require('path');
 const fs = require('fs');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
+const { StringDecoder } = require('string_decoder');
+const { DEFAULT_HEAVY_OPERATION_POLICY } = require('./heavy-operation-policy.cjs');
 const {
   FILTER_GRAPH,
   PROFILE_ID,
@@ -16,6 +18,10 @@ const {
 } = require('./b-profile.cjs');
 
 const MAX_PROGRESS_BYTES = 64 * 1024;
+const DEFAULT_PROGRESS_THROTTLE_MS = 100;
+const CAPABILITY_PROBE_TIMEOUT_MS = 5000;
+const MAX_CAPABILITY_OUTPUT_BYTES = 128 * 1024;
+const capabilityCache = new Map();
 
 // Keep tone-map profile graphs frozen; append only the narrowly-scoped SDR side-data cleanup.
 const OUTPUT_SANITIZATION_TYPES = [
@@ -42,92 +48,133 @@ function getFfmpegAbsolute() {
 }
 
 function hasExactToken(text, token) {
-  const escaped = token.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?=$|[^A-Za-z0-9])`).test(text);
+  // Escape regex metacharacters before applying the token boundary check. In
+  // particular, `bt.2390` must not accept `btX2390`.
+  const escaped = [...String(token)]
+    .map((character) => /[A-Za-z0-9]/.test(character) ? character : `\\${character}`)
+    .join('');
+  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?=$|[^A-Za-z0-9])`).test(String(text));
 }
 
-function checkCapability(ffmpegPath, profileId = PROFILE_ID_LOCAL_B) {
-  // Returns { ok: boolean, reason?: string }. Validate the profile before any probe.
-  if (!isKnownProfileId(profileId)) return { ok: false, reason: 'profile_unavailable' };
-  try {
-    const st = fs.statSync(ffmpegPath);
-    if (!st.isFile()) return { ok: false, reason: 'profile_unavailable' };
-    fs.accessSync(ffmpegPath, fs.constants.X_OK);
-  } catch {
-    return { ok: false, reason: 'profile_unavailable' };
-  }
-  try {
-    const r = spawnSync(ffmpegPath, ['-hide_banner', '-h', 'filter=libplacebo'], { encoding: 'utf8', timeout: 5000, shell: false });
-    if (r.error) throw r.error;
-    const libplaceboHelp = `${r.stdout || ''}${r.stderr || ''}`;
-    if (r.status !== 0 && !libplaceboHelp) return { ok: false, reason: 'profile_unavailable' };
-    if (!hasExactToken(libplaceboHelp, 'Filter libplacebo')) return { ok: false, reason: 'profile_unavailable' };
-    const common = ['tonemapping', 'gamut_mode', 'perceptual'];
-    for (const tok of common) {
-      if (!hasExactToken(libplaceboHelp, tok)) return { ok: false, reason: 'profile_unavailable' };
-    }
-    let profileRequirements;
-    if (profileId === PROFILE_ID_LOCAL_B) {
-      profileRequirements = ['spline', 'tonemapping_param'];
-    } else if (profileId === PROFILE_ID_GENERIC) {
-      profileRequirements = ['bt.2390'];
-    } else if (profileId === PROFILE_ID_PQ) {
-      profileRequirements = ['bt.2390', 'perceptual', 'peak_detect'];
-    } else {
-      return { ok: false, reason: 'profile_unavailable' };
-    }
-    for (const tok of profileRequirements) {
-      if (!hasExactToken(libplaceboHelp, tok)) return { ok: false, reason: 'profile_unavailable' };
-    }
-  } catch {
-    return { ok: false, reason: 'profile_unavailable' };
-  }
-  // Every SDR profile uses this exact, narrow sanitation suffix. Probe the filter and
-  // every enum named by the suffix before any conversion process can be spawned.
-  try {
-    const rSideData = spawnSync(ffmpegPath, ['-hide_banner', '-h', 'filter=sidedata'], { encoding: 'utf8', timeout: 5000, shell: false });
-    if (rSideData.error) throw rSideData.error;
-    const sideDataHelp = `${rSideData.stdout || ''}${rSideData.stderr || ''}`;
-    if (rSideData.status !== 0 && !sideDataHelp) return { ok: false, reason: 'profile_unavailable' };
-    if (!hasExactToken(sideDataHelp, 'Filter sidedata')) return { ok: false, reason: 'profile_unavailable' };
-    for (const type of OUTPUT_SANITIZATION_TYPES) {
-      if (!hasExactToken(sideDataHelp, type)) return { ok: false, reason: 'profile_unavailable' };
-    }
-  } catch {
-    return { ok: false, reason: 'profile_unavailable' };
-  }
-  if (profileId === PROFILE_ID_LOCAL_B) {
+function unavailableCapability() {
+  return { ok: false, reason: 'profile_unavailable' };
+}
+
+function probeCapabilityHelp(ffmpegPath, args) {
+  return new Promise((resolve) => {
+    let child;
+    let output = '';
+    let settled = false;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const fail = () => {
+      try { if (child) child.kill('SIGKILL'); } catch {}
+      finish(null);
+    };
     try {
-      const r2 = spawnSync(ffmpegPath, ['-hide_banner', '-h', 'filter=eq'], { encoding: 'utf8', timeout: 5000, shell: false });
-      if (r2.error) throw r2.error;
-      const eqHelp = `${r2.stdout || ''}${r2.stderr || ''}`;
-      if (r2.status !== 0 && !eqHelp) return { ok: false, reason: 'profile_unavailable' };
-      if (!hasExactToken(eqHelp, 'Filter eq')) return { ok: false, reason: 'profile_unavailable' };
-      if (!hasExactToken(eqHelp, 'gamma')) return { ok: false, reason: 'profile_unavailable' };
+      child = spawn(ffmpegPath, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
-      return { ok: false, reason: 'profile_unavailable' };
+      finish(null);
+      return;
     }
-  }
-  // Locked H.264/AAC capability for every profile (no fallback)
+    const collect = (chunk) => {
+      if (settled) return;
+      output += chunk.toString('utf8');
+      if (Buffer.byteLength(output, 'utf8') > MAX_CAPABILITY_OUTPUT_BYTES) fail();
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('error', () => finish(null));
+    child.on('close', (status) => finish({ status, output }));
+    timer = setTimeout(fail, CAPABILITY_PROBE_TIMEOUT_MS);
+  });
+}
+
+async function probeCapability(ffmpegPath, profileId) {
   try {
-    const r264 = spawnSync(ffmpegPath, ['-hide_banner', '-h', 'encoder=libx264'], { encoding: 'utf8', timeout: 5000, shell: false });
-    if (r264.error) throw r264.error;
-    const h264Help = `${r264.stdout || ''}${r264.stderr || ''}`;
-    if (r264.status !== 0 && !h264Help) return { ok: false, reason: 'profile_unavailable' };
-    if (!hasExactToken(h264Help, 'Encoder libx264')) return { ok: false, reason: 'profile_unavailable' };
+    const st = await fs.promises.stat(ffmpegPath);
+    if (!st.isFile()) return unavailableCapability();
+    await fs.promises.access(ffmpegPath, fs.constants.X_OK);
   } catch {
-    return { ok: false, reason: 'profile_unavailable' };
+    return unavailableCapability();
   }
-  try {
-    const rAac = spawnSync(ffmpegPath, ['-hide_banner', '-h', 'encoder=aac'], { encoding: 'utf8', timeout: 5000, shell: false });
-    if (rAac.error) throw rAac.error;
-    const aacHelp = `${rAac.stdout || ''}${rAac.stderr || ''}`;
-    if (rAac.status !== 0 && !aacHelp) return { ok: false, reason: 'profile_unavailable' };
-    if (!hasExactToken(aacHelp, 'Encoder aac')) return { ok: false, reason: 'profile_unavailable' };
-  } catch {
-    return { ok: false, reason: 'profile_unavailable' };
+
+  const help = async (probeArgs, requiredTokens) => {
+    const result = await probeCapabilityHelp(ffmpegPath, probeArgs);
+    if (!result || (result.status !== 0 && !result.output)) return null;
+    for (const token of requiredTokens) {
+      if (!hasExactToken(result.output, token)) return null;
+    }
+    return result.output;
+  };
+
+  const common = await help(
+    ['-hide_banner', '-h', 'filter=libplacebo'],
+    ['Filter libplacebo', 'tonemapping', 'gamut_mode', 'perceptual'],
+  );
+  if (common == null) return unavailableCapability();
+  let profileRequirements;
+  if (profileId === PROFILE_ID_LOCAL_B) {
+    profileRequirements = ['spline', 'tonemapping_param'];
+  } else if (profileId === PROFILE_ID_GENERIC) {
+    profileRequirements = ['bt.2390'];
+  } else if (profileId === PROFILE_ID_PQ) {
+    profileRequirements = ['bt.2390', 'perceptual', 'peak_detect'];
+  } else {
+    return unavailableCapability();
+  }
+  if (!profileRequirements.every((token) => hasExactToken(common, token))) return unavailableCapability();
+
+  const sideData = await help(
+    ['-hide_banner', '-h', 'filter=sidedata'],
+    ['Filter sidedata', ...OUTPUT_SANITIZATION_TYPES],
+  );
+  if (sideData == null) return unavailableCapability();
+
+  if (profileId === PROFILE_ID_LOCAL_B) {
+    const eq = await help(['-hide_banner', '-h', 'filter=eq'], ['Filter eq', 'gamma']);
+    if (eq == null) return unavailableCapability();
+  }
+  if (await help(['-hide_banner', '-h', 'encoder=libx264'], ['Encoder libx264']) == null) {
+    return unavailableCapability();
+  }
+  if (await help(['-hide_banner', '-h', 'encoder=aac'], ['Encoder aac']) == null) {
+    return unavailableCapability();
   }
   return { ok: true };
+}
+
+// The cache stores the in-flight promise as well as completed results. The
+// executable identity is part of the key so a replacement binary cannot reuse
+// a stale capability result.
+async function checkCapability(ffmpegPath, profileId = PROFILE_ID_LOCAL_B) {
+  if (!isKnownProfileId(profileId) || typeof ffmpegPath !== 'string' || !path.isAbsolute(ffmpegPath)) {
+    return unavailableCapability();
+  }
+  let st;
+  try {
+    st = await fs.promises.stat(ffmpegPath);
+    if (!st.isFile()) return unavailableCapability();
+    await fs.promises.access(ffmpegPath, fs.constants.X_OK);
+  } catch {
+    return unavailableCapability();
+  }
+  const identity = [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':');
+  const key = `${ffmpegPath}\\0${profileId}\\0${identity}`;
+  const cached = capabilityCache.get(key);
+  if (cached) return cached;
+  const pending = probeCapability(ffmpegPath, profileId).catch(() => unavailableCapability());
+  capabilityCache.set(key, pending);
+  return pending;
+}
+
+function clearCapabilityCache() {
+  capabilityCache.clear();
 }
 
 function buildFfmpegArgs(sourcePath, stagingPath, profileId) {
@@ -167,16 +214,27 @@ function buildFfmpegArgs(sourcePath, stagingPath, profileId) {
 }
 
 function parseProgressLine(line, state) {
-  // bounded progress parsing: expect key=value lines
-  // We collect out_time_ms or frame or progress
-  const idx = line.indexOf('=');
+  // FFmpeg emits key=value records. The stream can split records at any byte
+  // boundary, so callers retain only the current incomplete line.
+  const idx = String(line).indexOf('=');
   if (idx === -1) return null;
-  const key = line.slice(0, idx).trim();
-  const val = line.slice(idx + 1).trim();
-  if (key === 'out_time_ms') {
-    const ms = parseInt(val, 10);
-    if (!isNaN(ms)) {
-      state.outTimeMs = ms;
+  const key = String(line).slice(0, idx).trim();
+  const val = String(line).slice(idx + 1).trim();
+  if (key === 'out_time_ms' || key === 'out_time_us') {
+    const micros = Number(val);
+    if (Number.isSafeInteger(micros) && micros >= 0) {
+      state.outTimeMs = Math.max(state.outTimeMs || 0, micros);
+      return 'time';
+    }
+  } else if (key === 'out_time') {
+    const match = /^(\d+):(\d{2}):(\d{2})(?:\.(\d+))?$/.exec(val);
+    if (match) {
+      const fraction = (match[4] || '').slice(0, 6).padEnd(6, '0');
+      const micros = ((Number(match[1]) * 60 + Number(match[2])) * 60 + Number(match[3])) * 1000000 + Number(fraction || 0);
+      if (Number.isSafeInteger(micros)) {
+        state.outTimeMs = Math.max(state.outTimeMs || 0, micros);
+        return 'time';
+      }
     }
   } else if (key === 'progress') {
     if (val === 'continue') return 'continue';
@@ -185,24 +243,90 @@ function parseProgressLine(line, state) {
   return null;
 }
 
-function runBConversion(opts) {
-  const { sourcePath, stagingPath, profileId, onProgress, abortSignal, ffmpegPath: overrideFfmpeg } = opts;
-  const effectiveProfile = profileId === undefined ? PROFILE_ID_LOCAL_B : profileId;
-  if (!isKnownProfileId(effectiveProfile)) {
-    // Unknown profile fails closed immediately, no ffmpeg spawn
-    return Promise.resolve({ outcome: 'error', reason: 'invalid_request' });
-  }
-  const ffmpegPath = overrideFfmpeg || getFfmpegAbsolute();
-  return new Promise((resolve) => {
-    const cap = checkCapability(ffmpegPath, effectiveProfile);
-    if (!cap.ok) {
-      resolve({ outcome: 'error', reason: 'profile_unavailable' });
+function durationToMicros(durationSeconds) {
+  const seconds = Number(durationSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const micros = seconds * 1000000;
+  return Number.isSafeInteger(micros) ? micros : null;
+}
+
+function calculateProgressPercent(outTimeMs, durationSeconds) {
+  const durationMicros = durationToMicros(durationSeconds);
+  if (durationMicros == null || !Number.isFinite(outTimeMs) || outTimeMs < 0) return null;
+  return Math.max(0, Math.min(99, Math.floor((outTimeMs / durationMicros) * 100)));
+}
+
+function makeProgressReporter(onProgress, durationSeconds, throttleMs) {
+  let lastSentAt = -Infinity;
+  let pending = null;
+  let timer = null;
+  const effectiveThrottle = Number.isFinite(throttleMs) && throttleMs > 0 ? throttleMs : 0;
+  const send = (payload) => {
+    try { onProgress(payload); } catch {}
+    lastSentAt = Date.now();
+  };
+  const flush = () => {
+    if (!pending) return;
+    const payload = pending;
+    pending = null;
+    if (timer) { clearTimeout(timer); timer = null; }
+    send(payload);
+  };
+  const report = (outTimeMs, force = false) => {
+    const payload = { outTimeMs };
+    const percent = calculateProgressPercent(outTimeMs, durationSeconds);
+    if (percent != null) payload.percent = percent;
+    if (force || effectiveThrottle === 0 || Date.now() - lastSentAt >= effectiveThrottle) {
+      send(payload);
       return;
     }
+    pending = payload;
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        flush();
+      }, Math.max(1, effectiveThrottle - (Date.now() - lastSentAt)));
+    }
+  };
+  report.flush = flush;
+  report.clear = () => {
+    pending = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  return report;
+}
 
-    // Validate source/staging are absolute?
-    // Caller ensures revalidation.
+async function runBConversion(opts) {
+  const {
+    sourcePath,
+    stagingPath,
+    profileId,
+    onProgress,
+    abortSignal,
+    ffmpegPath: overrideFfmpeg,
+    timeoutMs = DEFAULT_HEAVY_OPERATION_POLICY.conversionTimeoutMs,
+    stallTimeoutMs = DEFAULT_HEAVY_OPERATION_POLICY.conversionStallTimeoutMs,
+    trackProcess,
+    untrackProcess,
+    touchActivity,
+    killProcess,
+    durationSeconds,
+    progressThrottleMs = DEFAULT_PROGRESS_THROTTLE_MS,
+  } = opts;
+  const effectiveProfile = profileId === undefined ? PROFILE_ID_LOCAL_B : profileId;
+  if (!isKnownProfileId(effectiveProfile)) {
+    return Promise.resolve({ outcome: 'error', reason: 'invalid_request' });
+  }
+  if (abortSignal && abortSignal.aborted) {
+    return Promise.resolve({ outcome: 'cancelled', reason: 'cancelled' });
+  }
+  const ffmpegPath = overrideFfmpeg || getFfmpegAbsolute();
+  const cap = await checkCapability(ffmpegPath, effectiveProfile);
+  if (!cap || !cap.ok) return { outcome: 'error', reason: 'profile_unavailable' };
+  if (abortSignal && abortSignal.aborted) return { outcome: 'cancelled', reason: 'cancelled' };
 
+  return new Promise((resolve) => {
     let args;
     try {
       args = buildFfmpegArgs(sourcePath, stagingPath, effectiveProfile);
@@ -219,85 +343,131 @@ function runBConversion(opts) {
     }
 
     let stdoutBuf = '';
+    const stdoutDecoder = new StringDecoder('utf8');
     let stderrBound = Buffer.alloc(0);
     const maxErr = 32 * 1024;
-    let progressBytes = 0;
     let finished = false;
+    let timeoutTimer = null;
+    let stallTimer = null;
+    let forcedReason = null;
+    const progressReporter = onProgress
+      ? makeProgressReporter(onProgress, durationSeconds, progressThrottleMs)
+      : null;
 
     const cleanup = () => {
-      if (abortSignal) {
-        abortSignal.removeEventListener('abort', onAbort);
-      }
+      clearTimeout(timeoutTimer);
+      clearTimeout(stallTimer);
+      if (progressReporter) progressReporter.clear();
+      if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      try { if (untrackProcess) untrackProcess(child); } catch {}
     };
-
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(result);
+    };
+    const killChild = () => {
+      try {
+        if (killProcess) killProcess(child);
+        else child.kill('SIGKILL');
+      } catch {}
+    };
     const onAbort = () => {
       if (finished) return;
-      try { child.kill('SIGKILL'); } catch {}
+      killChild();
+    };
+    const activity = () => {
+      if (finished) return;
+      try { if (touchActivity) touchActivity(); } catch {}
+      clearTimeout(stallTimer);
+      if (stallTimeoutMs > 0) {
+        stallTimer = setTimeout(() => {
+          forcedReason = 'conversion_stalled';
+          killChild();
+          finish({ outcome: 'error', reason: forcedReason });
+        }, stallTimeoutMs);
+      }
     };
 
+    try { if (trackProcess) trackProcess(child); } catch {}
     if (abortSignal) {
-      if (abortSignal.aborted) {
-        try { child.kill('SIGKILL'); } catch {}
-      } else {
-        abortSignal.addEventListener('abort', onAbort);
-      }
+      abortSignal.addEventListener('abort', onAbort, { once: true });
     }
+    if (timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        forcedReason = 'conversion_timeout';
+        killChild();
+        finish({ outcome: 'error', reason: forcedReason });
+      }, timeoutMs);
+    }
+    activity();
 
     const state = {};
-
-    child.stdout.on('data', (chunk) => {
-      if (progressBytes + chunk.length > MAX_PROGRESS_BYTES) {
-        // bound: ignore excess but keep parsing limited
-        chunk = chunk.slice(0, MAX_PROGRESS_BYTES - progressBytes);
-        if (chunk.length === 0) return;
-      }
-      progressBytes += chunk.length;
-      stdoutBuf += chunk.toString('utf8');
-      let lines = stdoutBuf.split('\n');
-      stdoutBuf = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        parseProgressLine(trimmed, state);
-        if (onProgress && state.outTimeMs != null) {
-          // Estimate percent? We don't have duration; just send pulse
-          // Renderer will show phase converting with bounded percent if available
-          // We emit progress with state.outTimeMs but don't leak path
-          // For bounded, cap calls
-          try { onProgress({ outTimeMs: state.outTimeMs }); } catch {}
+    const consumeProgressText = (text) => {
+      stdoutBuf += text;
+      let newline;
+      while ((newline = stdoutBuf.indexOf('\n')) !== -1) {
+        const line = stdoutBuf.slice(0, newline);
+        stdoutBuf = stdoutBuf.slice(newline + 1);
+        if (!line.trim()) continue;
+        const priorTime = state.outTimeMs;
+        parseProgressLine(line, state);
+        if (progressReporter && state.outTimeMs != null && state.outTimeMs !== priorTime) {
+          progressReporter(state.outTimeMs);
         }
       }
+      // Bound only an incomplete record. Complete records are consumed even
+      // when one OS pipe event contains many megabytes of progress output.
+      if (Buffer.byteLength(stdoutBuf, 'utf8') > MAX_PROGRESS_BYTES) {
+        stdoutBuf = stdoutBuf.slice(-MAX_PROGRESS_BYTES);
+      }
+    };
+    child.stdout.on('data', (chunk) => {
+      activity();
+      consumeProgressText(stdoutDecoder.write(chunk));
     });
 
     child.stderr.on('data', (chunk) => {
+      activity();
       if (stderrBound.length < maxErr) {
         const remain = maxErr - stderrBound.length;
-        const slice = chunk.slice(0, remain);
-        stderrBound = Buffer.concat([stderrBound, slice]);
+        stderrBound = Buffer.concat([stderrBound, chunk.slice(0, remain)]);
       }
     });
 
     child.on('error', () => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      // Never return stderr/path
-      resolve({ outcome: 'error', reason: 'conversion_failed' });
+      if (forcedReason) return;
+      if (abortSignal && abortSignal.aborted) {
+        finish({ outcome: 'cancelled', reason: 'cancelled' });
+        return;
+      }
+      finish({ outcome: 'error', reason: 'conversion_failed' });
     });
 
     child.on('close', (code, signal) => {
-      if (finished) return;
-      finished = true;
-      cleanup();
+      if (forcedReason) return;
       if (signal === 'SIGKILL' || (abortSignal && abortSignal.aborted)) {
-        resolve({ outcome: 'cancelled', reason: 'cancelled' });
+        finish({ outcome: 'cancelled', reason: 'cancelled' });
         return;
       }
       if (code !== 0) {
-        resolve({ outcome: 'error', reason: 'conversion_failed' });
+        if (progressReporter) progressReporter.clear();
+        finish({ outcome: 'error', reason: 'conversion_failed' });
         return;
       }
-      resolve({ outcome: 'success' });
+      // Process a final record without a trailing newline and deliver the most
+      // recent value before conversion transitions to verification.
+      consumeProgressText(stdoutDecoder.end());
+      if (stdoutBuf.trim()) {
+        const priorTime = state.outTimeMs;
+        parseProgressLine(stdoutBuf, state);
+        if (progressReporter && state.outTimeMs != null && state.outTimeMs !== priorTime) {
+          progressReporter(state.outTimeMs, true);
+        }
+      }
+      if (progressReporter) progressReporter.flush();
+      finish({ outcome: 'success' });
     });
   });
 }
@@ -305,7 +475,10 @@ function runBConversion(opts) {
 module.exports = {
   getFfmpegAbsolute,
   checkCapability,
+  clearCapabilityCache,
   buildFfmpegArgs,
+  parseProgressLine,
+  calculateProgressPercent,
   runBConversion,
   FILTER_GRAPH,
   PROFILE_ID,
@@ -319,4 +492,6 @@ module.exports = {
   isKnownProfileId,
   getFilterGraph,
   OUTPUT_SANITIZATION_SUFFIX,
+  MAX_PROGRESS_BYTES,
+  DEFAULT_PROGRESS_THROTTLE_MS,
 };

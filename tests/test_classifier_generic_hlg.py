@@ -164,6 +164,7 @@ class TestGenericHLG(unittest.TestCase):
             color_transfer=EXPECTED_HLG["color_transfer"],
             color_primaries=EXPECTED_HLG["color_primaries"],
             color_range=EXPECTED_HLG["color_range"],
+            level=EXPECTED_HLG["level"],
             dv_profile=EXPECTED_HLG["dv_profile"],
             dv_level=4,
             dv_compat_id=EXPECTED_HLG["dv_compat_id"],

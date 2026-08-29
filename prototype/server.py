@@ -308,7 +308,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # Inspect temp file
-            ev, err = inspect_temp_file(tmpfile, display_hint, REPO_ROOT)
+            ev, err = inspect_temp_file(
+                tmpfile, display_hint, REPO_ROOT,
+                precomputed_sha256=hasher.hexdigest(),
+            )
 
             if ev is None and err is not None:
                 # Map oversize etc

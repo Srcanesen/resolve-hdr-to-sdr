@@ -3,9 +3,10 @@ from unittest import mock
 import subprocess
 import json
 import hashlib
+import tempfile
 from pathlib import Path
 
-from prototype.inspector import inspect_local_path, get_ffprobe_executable, sha256_file, _parse_ffprobe_json
+from prototype.inspector import inspect_local_path, inspect_user_selected_path, inspect_temp_file, get_ffprobe_executable, sha256_file, _parse_ffprobe_json
 from prototype.classifier import classify
 from prototype.contracts import Classification
 
@@ -110,6 +111,10 @@ class TestInspector(unittest.TestCase):
             argv = args[0]
             self.assertEqual(argv[0], expected_exe)
             self.assertIn("-show_streams", argv)
+            self.assertIn("-select_streams", argv)
+            self.assertEqual(argv[argv.index("-select_streams") + 1], "v")
+            self.assertIn("0%+1", argv)
+            self.assertNotIn("%+#1", argv)
             self.assertIn(str(sample_path.resolve(strict=True)), argv)
             self.assertFalse(kwargs.get("shell", False))
             self.assertEqual(kwargs.get("shell"), False)
@@ -173,6 +178,88 @@ class TestInspector(unittest.TestCase):
                     ev, err = inspect_local_path(str(sample_path), REPO_ROOT)
                     self.assertIsNone(ev)
                     self.assertEqual(err, "identity_changed")
+
+    def test_inspection_hashes_once_and_detects_mutation(self):
+        with tempfile.NamedTemporaryFile(suffix=".mov", delete=False) as f:
+            f.write(b"original")
+            path = Path(f.name)
+        try:
+            fake_output = json.dumps({"streams": [{"codec_type": "video"}], "format": {}}).encode()
+            hash_calls = []
+
+            def mutate_during_hash(candidate):
+                hash_calls.append(candidate)
+                candidate.write_bytes(b"changed!")
+                return "a" * 64
+
+            with mock.patch("prototype.inspector.sha256_file", side_effect=mutate_during_hash):
+                with mock.patch("prototype.inspector.subprocess.run") as mock_run:
+                    mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output, stderr=b"")
+                    ev, err = inspect_user_selected_path(str(path), REPO_ROOT)
+            self.assertEqual(len(hash_calls), 1)
+            self.assertIsNone(ev)
+            self.assertEqual(err, "identity_changed")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_upload_inspection_reuses_precomputed_hash(self):
+        with tempfile.NamedTemporaryFile(suffix=".mov", delete=False) as f:
+            f.write(b"upload")
+            path = Path(f.name)
+        try:
+            fake_output = json.dumps({"streams": [{"codec_type": "video"}], "format": {}}).encode()
+            with mock.patch("prototype.inspector.sha256_file") as mock_hash:
+                with mock.patch("prototype.inspector.subprocess.run") as mock_run:
+                    mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output, stderr=b"")
+                    ev, err = inspect_temp_file(path, "upload.mov", REPO_ROOT, precomputed_sha256="a" * 64)
+            self.assertIsNone(err)
+            self.assertIsNotNone(ev)
+            mock_hash.assert_not_called()
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_primary_real_video_ignores_audio_and_attached_picture_frames(self):
+        payload = {
+            "streams": [
+                {"index": 0, "codec_type": "audio"},
+                {"index": 1, "codec_type": "video", "disposition": {"attached_pic": 1}, "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 5}]},
+                {"index": 2, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1", "pix_fmt": "yuv420p10le", "color_space": "bt2020nc", "color_transfer": "arib-std-b67", "color_primaries": "bt2020", "color_range": "tv", "side_data_list": []},
+            ],
+            "frames": [
+                {"stream_index": 1, "media_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 5}]},
+                {"stream_index": 2, "media_type": "video", "side_data_list": [{"side_data_type": "Mastering display metadata"}]},
+            ],
+            "format": {},
+        }
+        ev = _parse_ffprobe_json(json.dumps(payload).encode(), "multi.mov", 100, "a" * 64)
+        self.assertTrue(ev.parse_ok)
+        self.assertEqual(ev.codec_name, "hevc")
+        self.assertFalse(ev.has_dovi)
+        self.assertTrue(ev.has_mdcv)
+
+    def test_frame_dovi_conflict_fails_closed(self):
+        payload = {
+            "streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1", "pix_fmt": "yuv420p10le", "color_space": "bt2020nc", "color_transfer": "arib-std-b67", "color_primaries": "bt2020", "color_range": "tv", "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 8, "dv_level": 4, "dv_bl_signal_compatibility_id": 4}]}],
+            "frames": [{"stream_index": 0, "media_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 5}]}],
+            "format": {},
+        }
+        ev = _parse_ffprobe_json(json.dumps(payload).encode(), "conflict.mov", 100, "b" * 64)
+        self.assertTrue(ev.parse_ok)
+        self.assertTrue(ev.is_contradictory)
+        self.assertEqual(classify(ev).classification, Classification.uncertain)
+        self.assertFalse(classify(ev).can_convert)
+
+    def test_dovi_flags_are_strict_and_zero_is_false(self):
+        base = {"codec_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "rpu_present_flag": "0", "el_present_flag": "1", "bl_present_flag": 0}]}
+        ev = _parse_ffprobe_json(json.dumps({"streams": [base], "format": {}}).encode(), "flags.mov", 100, "c" * 64)
+        self.assertTrue(ev.parse_ok)
+        self.assertFalse(ev.rpu_present)
+        self.assertTrue(ev.el_present)
+        self.assertFalse(ev.bl_present)
+
+        malformed = {"streams": [{"codec_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "rpu_present_flag": "false"}]}], "format": {}}
+        bad = _parse_ffprobe_json(json.dumps(malformed).encode(), "bad-flags.mov", 100, "d" * 64)
+        self.assertFalse(bad.parse_ok)
 
     def test_no_shell_fallback(self):
         # ensure inspector never uses shell=True

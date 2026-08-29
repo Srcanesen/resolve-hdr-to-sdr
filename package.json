@@ -19,9 +19,10 @@
     "test:python": "python3 -m unittest discover -s tests -v",
     "test": "npm run test:python && npm run test:electron",
     "check": "npm run test:python && npm run test:electron",
+    "doctor": "node scripts/tool-doctor.cjs",
     "bundle:resolve": "node scripts/build-workflow-integration.cjs"
   },
   "devDependencies": {
-    "electron": "^41.10.3"
+    "electron": "41.10.3"
   }
 }

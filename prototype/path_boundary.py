@@ -4,6 +4,15 @@ from pathlib import Path
 from typing import Tuple
 
 
+# macOS exposes these compatibility links for ordinary temporary/system paths.
+# They are the only symlinks accepted by the source policy.
+_ALLOWED_SYSTEM_SYMLINKS = {
+    "/tmp": "/private/tmp",
+    "/var": "/private/var",
+    "/etc": "/private/etc",
+}
+
+
 class PathValidationError(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -60,6 +69,27 @@ def _validate_common_input(path_str: str) -> Path:
     return p
 
 
+def _validate_symlink_policy(p: Path) -> None:
+    """Reject source symlinks consistently, allowing only OS alias links."""
+    current = Path(p.anchor)
+    for part in p.parts[1:]:
+        current /= part
+        try:
+            item = os.lstat(current)
+        except FileNotFoundError:
+            raise PathValidationError("not_found")
+        except OSError:
+            raise PathValidationError("symlink_check_failed")
+        if not stat.S_ISLNK(item.st_mode):
+            continue
+        try:
+            resolved = str(current.resolve(strict=True))
+        except (FileNotFoundError, RuntimeError, OSError):
+            raise PathValidationError("resolve_failed")
+        if _ALLOWED_SYSTEM_SYMLINKS.get(str(current)) != resolved:
+            raise PathValidationError("symlink_rejected")
+
+
 def _canonicalize_and_validate_regular(p: Path) -> Path:
     """Resolve strict and validate canonical is regular .mov/.mp4."""
     try:
@@ -86,6 +116,7 @@ def validate_user_selected_path(input_path_str: str, repo_root: Path) -> Path:
     No shell/PATH fallback – caller resolves ffprobe separately.
     """
     p = _validate_common_input(input_path_str)
+    _validate_symlink_policy(p)
     canonical = _canonicalize_and_validate_regular(p)
     # No Sample root containment; reject symlink final already done via lstat.
     # Do not leak path – caller maps reason to invalid_path.
@@ -132,6 +163,8 @@ def validate_local_path(input_path_str: str, repo_root: Path) -> Path:
         raise PathValidationError("is_directory")
     if not stat.S_ISREG(lst.st_mode):
         raise PathValidationError("not_regular_file")
+
+    _validate_symlink_policy(p)
 
     # canonicalize
     try:

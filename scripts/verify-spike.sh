@@ -3,8 +3,12 @@ set -euo pipefail
 # verify-spike.sh – checks source identity/metadata, output tags/privacy, timing, and frame preservation.
 # For hlg-local-b-v1: exact known-source SHA gate (allowlisted fingerprints).
 # For hlg-rec709-v1: verifies exact HLG input metadata (bt2020nc/arib-std-b67/bt2020 tv, >=10-bit YUV, has_dovi=false) before accepting output.
-# Common: source!=output, timing/frame preservation, Rec.709 H.264 High yuv420p tags, privacy scan, no-overwrite.
-# ponytail: deterministic metadata/timing checks are not visual correctness; human still comparison remains required.
+# Common: source!=output, bounded timing/dimension/audio preservation, Rec.709 H.264 High yuv420p tags,
+# semantic privacy-tag scan, and no-overwrite. HDR side-data scanning is intentionally bounded.
+# Privacy pattern equivalent: com[.]apple[.]quicktime[.] (matched as a semantic tag key).
+# Bounded HDR evidence names include Mastering display metadata, Content light level metadata,
+# HDR10+, DOVI, HDR Vivid, and Ambient viewing environment.
+# Deterministic metadata/timing checks are not visual correctness; human comparison remains required.
 
 usage() {
   echo "Usage: $0 <source.MOV> <output.MOV> [profileId]" >&2
@@ -24,22 +28,15 @@ case "$EXPECTED_PROFILE" in
     ;;
 esac
 
-# Resolve ffprobe: prefer libplacebo-capable binary when detected (mirrors converter).
+# Resolve only the self-contained bundle tool. Never fall back to PATH or a
+# developer-specific install; an incomplete bundle must fail closed.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-resolve_ffprobe() {
-  local candidates=(
-    "$PROJECT_ROOT/tools/ffprobe"
-    "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe"
-    "/opt/homebrew/bin/ffprobe"
-  )
-  for c in "${candidates[@]}"; do
-    if [ -x "$c" ]; then echo "$c"; return 0; fi
-  done
-  if command -v ffprobe >/dev/null 2>&1; then command -v ffprobe; return 0; fi
-  echo "ffprobe"
-}
-FFPROBE="$(resolve_ffprobe)"
+FFPROBE="$PROJECT_ROOT/tools/ffprobe"
+if [ ! -f "$FFPROBE" ] || [ ! -x "$FFPROBE" ]; then
+  echo "FAIL: bundled ffprobe is missing or not executable" >&2
+  exit 1
+fi
 
 # Use the same realpath(abspath) rule for both paths, including symlinked parents.
 realpath_abspath() {
@@ -180,7 +177,7 @@ PY
   fi
   echo "OK: source HLG metadata verified for profile $EXPECTED_PROFILE" >&2
 elif [ "$EXPECTED_PROFILE" = "pq-rec709-v1" ]; then
-  # PQ narrow gate: strict re-gate using stream + first-frame side data; require both MDCV/CLLI and reject DOVI/HDR10+
+  # PQ narrow gate: strict re-gate using stream + bounded initial side-data evidence; require both MDCV/CLLI and reject DOVI/HDR10+
   # Requirements: parse_ok, not unspecified/contradictory, exact bt2020nc + smpte2084 + bt2020, tv, >=10-bit allowlist, has_dovi=false, has_hdr10plus=false, BOTH MDCV and CLLI present.
   SRC_META_JSON="$("$FFPROBE" -v error -select_streams v:0 -read_intervals "%+#1" -show_streams -show_frames -of json "$SRC_REAL" 2>/dev/null)" || {
     echo "FAIL: ffprobe failed for source $SRC_INPUT (profile $EXPECTED_PROFILE)" >&2
@@ -200,7 +197,7 @@ ct = v.get("color_transfer")
 cp = v.get("color_primaries")
 cr = v.get("color_range")
 pix = v.get("pix_fmt")
-# Detect DOVI/HDR10+ and MDCV/CLLI from stream side_data_list AND bounded first frame side_data
+# Detect DOVI/HDR10+ and MDCV/CLLI from stream side_data_list AND bounded initial frame side_data
 def collect_flags(data):
     has_dovi = False
     has_hdr10plus = False
@@ -222,7 +219,7 @@ def collect_flags(data):
             has_mdcv = True
         if t == "clli" or "clli" in t:
             has_clli = True
-    # frames (first frame only due to -read_intervals %+#1)
+    # frames from the bounded initial probe interval (%+#1 packet/frame bound)
     frames = data.get("frames", []) or []
     for fr in frames:
         f_side = fr.get("side_data_list")
@@ -319,30 +316,33 @@ else
   exit 1
 fi
 
-# HLG timing policy: passthrough timestamps; retain the exact decoded/presentation frame count.
-# `nb_frames` can include edit-list preroll (1.MOV reports 503 samples but 491 decoded frames).
-probe_timing() {
-  "$FFPROBE" -v error -count_frames -select_streams v:0 \
-    -show_entries stream=duration,nb_read_frames -of json "$1" |
-    python3 -c 'import json,sys; s=(json.load(sys.stdin).get("streams") or [{}])[0]; print((s.get("duration") or "") , (s.get("nb_read_frames") or ""))'
+# Timing policy: passthrough timestamps, exact decoded video-frame count, unchanged
+# display dimensions (coded dimensions plus a 90-degree display matrix), and preserved audio streams.
+# Missing/N/A/non-numeric values fail closed via the bounded verifier helper.
+probe_contract() {
+  "$FFPROBE" -v error -count_frames \
+    -show_entries 'stream=codec_type,width,height,duration,nb_read_frames,codec_name,channels,sample_rate:stream_side_data=side_data_type,rotation:format=duration' \
+    -of json "$1" 2>/dev/null
 }
-read -r SRC_DURATION SRC_FRAMES <<< "$(probe_timing "$SRC_REAL")"
-read -r DST_DURATION DST_FRAMES <<< "$(probe_timing "$DST_REAL")"
+if ! SRC_CONTRACT_JSON="$(probe_contract "$SRC_REAL")"; then
+  echo "FAIL: timing/media probe failed for source" >&2
+  exit 1
+fi
+if ! DST_CONTRACT_JSON="$(probe_contract "$DST_REAL")"; then
+  echo "FAIL: timing/media probe failed for output" >&2
+  exit 1
+fi
+if [ -z "$SRC_CONTRACT_JSON" ] || [ -z "$DST_CONTRACT_JSON" ]; then
+  echo "FAIL: timing/media probe returned no data" >&2
+  exit 1
+fi
 DURATION_TOLERANCE="0.050"
-python3 - "$SRC_DURATION" "$DST_DURATION" "$SRC_FRAMES" "$DST_FRAMES" "$DURATION_TOLERANCE" <<'PY'
-import sys
-src_duration, dst_duration = float(sys.argv[1]), float(sys.argv[2])
-src_frames, dst_frames = int(sys.argv[3]), int(sys.argv[4])
-tolerance = float(sys.argv[5])
-delta = abs(dst_duration - src_duration)
-if src_frames != dst_frames:
-    print(f"FAIL: video frame count changed source={src_frames} output={dst_frames}", file=sys.stderr)
-    raise SystemExit(1)
-if delta > tolerance:
-    print(f"FAIL: video duration delta {delta:.6f}s exceeds {tolerance:.3f}s", file=sys.stderr)
-    raise SystemExit(1)
-print(f"OK: timing source={src_duration:.6f}s output={dst_duration:.6f}s delta={delta:.6f}s frames={src_frames}", file=sys.stderr)
-PY
+# The helper checks width/height, exact video frame count, duration, audio stream count,
+# AAC output codec, and channel/sample-rate preservation without float()/int() crashes.
+if ! printf '%s\0%s' "$SRC_CONTRACT_JSON" "$DST_CONTRACT_JSON" | \
+  python3 "$PROJECT_ROOT/electron/verify_contract.py" media "$DURATION_TOLERANCE"; then
+  exit 1
+fi
 
 # Output ffprobe tags must be Rec.709 SDR.
 PROBE="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,color_range,width,height -of json "$DST_REAL")"
@@ -359,74 +359,39 @@ if [ "$PR" != "High" ]; then echo "FAIL: profile $PR != High" >&2; FAIL=1; fi
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
 echo "OK: output Rec.709 SDR tags $CS/$CT/$CP $CR $PF $CN $PR for profile $EXPECTED_PROFILE" >&2
 
-# Only inspect the bounded first decoded output frame. A Rec.709 SDR export must not
-# retain HDR mastering/light-level, HDR10+, Dolby Vision, HDR Vivid, or ambient HDR data.
-DST_FRAME_SIDE_DATA="$("$FFPROBE" -v error -select_streams v:0 -read_intervals "%+#1" -show_frames -show_entries frame=side_data -of json "$DST_REAL" 2>/dev/null)" || {
-  echo "FAIL: ffprobe failed while inspecting first output frame side data" >&2
+# Inspect a bounded set of output frames and stream side data. forbidden HDR frame side data
+# is rejected only within this bounded evidence window. This is an evidence check, not
+# an unbounded claim that later packets contain no HDR metadata.
+HDR_SCAN_FRAMES=32
+DST_FRAME_SIDE_DATA="$("$FFPROBE" -v error -select_streams v:0 -read_intervals "%+#${HDR_SCAN_FRAMES}" \
+  -show_streams -show_frames -show_entries 'stream=side_data_list:frame=side_data_list' -of json "$DST_REAL" 2>/dev/null)" || {
+  echo "FAIL: ffprobe failed while inspecting bounded output HDR side data" >&2
   exit 1
 }
 if [ -z "$DST_FRAME_SIDE_DATA" ]; then
-  echo "FAIL: empty ffprobe output while inspecting first output frame side data" >&2
+  echo "FAIL: empty ffprobe output while inspecting bounded output HDR side data" >&2
   exit 1
 fi
-printf '%s\n' "$DST_FRAME_SIDE_DATA" | python3 -c '
-import json
-import sys
-
-data = json.load(sys.stdin)
-frames = data.get("frames", []) or []
-first = frames[0] if frames else {}
-side = first.get("side_data_list")
-if side is None:
-    side = first.get("side_data", []) or []
-if not isinstance(side, list):
-    side = []
-
-forbidden = []
-for item in side:
-    if not isinstance(item, dict):
-        continue
-    name = str(item.get("side_data_type", ""))
-    normalized = name.lower().replace("_", " ")
-    kind = None
-    if ("mastering display metadata" in normalized or
-            "mastering display" in normalized or "mdcv" in normalized):
-        kind = "MDCV"
-    elif ("content light level metadata" in normalized or
-          "content light" in normalized or "clli" in normalized):
-        kind = "CLLI"
-    elif ("hdr10+" in normalized or "hdr10 plus" in normalized or
-          "hdr10plus" in normalized or "st2094" in normalized or
-          "dynamic hdr plus" in normalized):
-        kind = "HDR10+"
-    elif "dovi" in normalized or "dolby vision" in normalized:
-        kind = "DOVI"
-    elif "hdr vivid" in normalized or "dynamic hdr vivid" in normalized:
-        kind = "HDR Vivid"
-    elif ("ambient viewing environment" in normalized or
-          "ambient hdr" in normalized or "amve" in normalized):
-        kind = "ambient HDR"
-    if kind:
-        forbidden.append(f"{kind} ({name})")
-
-if forbidden:
-    print("FAIL: output contains forbidden HDR frame side data: " + ", ".join(forbidden), file=sys.stderr)
-    raise SystemExit(1)
-print("OK: first output frame contains no forbidden HDR side data", file=sys.stderr)
-'
-
-# Reject every QuickTime private tag plus location, ISO6709, and creation-time/date tags.
-PRIVACY_PATTERN='com[.]apple[.]quicktime[.]|iso6709|location|creation[ _-]?(time|date)|date[ _-]?created'
-META="$("$FFPROBE" -v error -show_format -show_streams -of json "$DST_REAL")"
-if printf '%s\n' "$META" | grep -v "chroma_location" | grep -Ei "$PRIVACY_PATTERN" >/dev/null; then
-  echo "FAIL: output contains forbidden privacy/creation metadata" >&2
+# The helper scans stream evidence and at most HDR_SCAN_FRAMES decoded frames.
+if ! printf '%s' "$DST_FRAME_SIDE_DATA" | python3 "$PROJECT_ROOT/electron/verify_contract.py" hdr "$HDR_SCAN_FRAMES"; then
   exit 1
 fi
-if strings -a "$DST_REAL" | grep -v "chroma_location" | grep -Ei "$PRIVACY_PATTERN" >/dev/null; then
-  echo "FAIL: output contains forbidden privacy/creation bytes" >&2
+
+# Apply the privacy contract to semantic ffprobe tag maps only. Raw payload bytes are
+# not metadata and may legitimately contain these words in compressed media.
+META="$("$FFPROBE" -v error -show_format -show_streams -of json "$DST_REAL" 2>/dev/null)" || {
+  echo "FAIL: ffprobe failed while inspecting output metadata" >&2
+  exit 1
+}
+if [ -z "$META" ]; then
+  echo "FAIL: empty output metadata probe" >&2
   exit 1
 fi
-echo "OK: no com.apple.quicktime.*, ISO6709, location, or creation-time metadata" >&2
+# The helper examines only format/stream tags, so encoder text or compressed bytes
+# containing words such as "location" do not create a false positive.
+if ! printf '%s' "$META" | python3 "$PROJECT_ROOT/electron/verify_contract.py" privacy; then
+  exit 1
+fi
 
 DST_SHA="$(shasum -a 256 "$DST_REAL" | awk '{print $1}')"
 DST_SIZE="$(stat -f %z "$DST_REAL" 2>/dev/null || stat -c %s "$DST_REAL")"

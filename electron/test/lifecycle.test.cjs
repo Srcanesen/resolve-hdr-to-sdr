@@ -117,6 +117,10 @@ test('lifecycle ordered Initialize -> SetAPITimeout(10) -> RegisterCallback and 
 
   const res = await main.startApp({ app: appMock, workflowIntegration: wi });
   assert.equal(res.ok, true);
+  const activeService = main._getConversionServiceForTest();
+  assert.ok(activeService && typeof activeService.trackProcess === 'function');
+  const child = { killed: [], kill(signal) { this.killed.push(signal); } };
+  activeService.trackProcess(child);
   assert.deepEqual(callOrder.slice(0,3), [
     'Initialize:com.hdrtosdr.app',
     'SetAPITimeout:10',
@@ -132,6 +136,7 @@ test('lifecycle ordered Initialize -> SetAPITimeout(10) -> RegisterCallback and 
   // Emit before-quit twice
   appMock.emit('before-quit');
   appMock.emit('before-quit');
+  assert.deepEqual(child.killed, ['SIGKILL'], 'app quit must kill tracked child processes');
   assert.equal(wi._cleanupCount, 1, 'CleanUp must be called exactly once even if before-quit emitted twice');
 
   // Plugin window close quits app

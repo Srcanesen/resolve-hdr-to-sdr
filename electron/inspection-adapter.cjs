@@ -1,11 +1,17 @@
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const { DEFAULT_HEAVY_OPERATION_POLICY } = require('./heavy-operation-policy.cjs');
 
 const MAX_REQUEST_BYTES = 8192;
-const TIMEOUT_MS = 20000;
+const TIMEOUT_MS = DEFAULT_HEAVY_OPERATION_POLICY.inspectionTimeoutMs;
 const MAX_STDOUT = 64 * 1024;
 const MAX_STDERR = 32 * 1024;
+const STALL_TIMEOUT_MS = DEFAULT_HEAVY_OPERATION_POLICY.inspectionStallTimeoutMs;
+
+function boundedTimeout(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 function isAbsoluteExecutable(p) {
   if (!p || typeof p !== 'string') return false;
@@ -63,36 +69,123 @@ function resolveBackendRoot() {
   return { ok: true, root: devRoot };
 }
 
-function validateCliResponse(obj) {
-  if (!obj || typeof obj !== 'object') return false;
-  if (obj.outcome !== 'complete' && obj.outcome !== 'error') return false;
-  if (obj.outcome === 'error') {
-    return typeof obj.reason === 'string' && obj.reason.length > 0 && obj.reason.length < 200;
-  }
-  // complete
-  const r = obj.result;
-  if (!r || typeof r !== 'object') return false;
-  // allowed keys check: privacy-shaped fields only
-  const allowedTop = new Set(['displayName', 'size', 'sha256', 'color', 'dovi', 'duration', 'classification', 'reason', 'canConvert', 'profileId']);
-  for (const k of Object.keys(r)) {
-    if (!allowedTop.has(k)) return false;
-  }
-  if (typeof r.classification !== 'string') return false;
-  if (typeof r.reason !== 'string') return false;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ALLOWED_CLASSIFICATIONS = new Set([
+  'hlgKnownLocal', 'hlgSupported', 'pqSupported',
+  'pqHdr10Unsupported', 'dolbyVisionUnsupported', 'uncertain',
+]);
+const ALLOWED_PROFILES = new Set(['hlg-local-b-v1', 'hlg-rec709-v1', 'pq-rec709-v1']);
+const EXPECTED_PROFILE_BY_CLASSIFICATION = {
+  hlgKnownLocal: 'hlg-local-b-v1',
+  hlgSupported: 'hlg-rec709-v1',
+  pqSupported: 'pq-rec709-v1',
+};
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isSafeText(value, maxLength) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= maxLength
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isSafeReason(value) {
+  return isSafeText(value, 200) && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+function validateInspectionResult(r, { allowSourceId = false } = {}) {
+  if (!isPlainObject(r)) return false;
+  const allowedResult = new Set([
+    'displayName', 'size', 'sha256', 'color', 'dovi', 'duration',
+    'classification', 'reason', 'canConvert', 'profileId',
+    ...(allowSourceId ? ['sourceId'] : []),
+  ]);
+  for (const key of Object.keys(r)) if (!allowedResult.has(key)) return false;
+
+  if (!ALLOWED_CLASSIFICATIONS.has(r.classification)) return false;
+  if (!isSafeReason(r.reason)) return false;
   if (typeof r.canConvert !== 'boolean') return false;
-  // classification must be in enum (now includes pqSupported)
-  const allowedCls = new Set(['hlgKnownLocal', 'hlgSupported', 'pqSupported', 'pqHdr10Unsupported', 'dolbyVisionUnsupported', 'uncertain']);
-  if (!allowedCls.has(r.classification)) return false;
-  // profileId if present must be known
-  if ('profileId' in r && r.profileId != null) {
-    if (typeof r.profileId !== 'string') return false;
-    const allowedProfiles = new Set(['hlg-local-b-v1', 'hlg-rec709-v1', 'pq-rec709-v1']);
-    if (!allowedProfiles.has(r.profileId)) return false;
+
+  if ('displayName' in r) {
+    if (!isSafeText(r.displayName, 255) || /[/\\]/.test(r.displayName)) return false;
+  }
+  if ('size' in r && (!Number.isSafeInteger(r.size) || r.size < 0)) return false;
+  if ('sha256' in r && (typeof r.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.sha256))) return false;
+  if ('duration' in r && !isSafeText(r.duration, 128)) return false;
+
+  if ('color' in r) {
+    if (!isPlainObject(r.color)) return false;
+    const colorKeys = new Set(['colorSpace', 'colorTransfer', 'colorPrimaries', 'colorRange', 'pixFmt', 'codecTag', 'codecName', 'chromaLocation']);
+    for (const key of Object.keys(r.color)) {
+      if (!colorKeys.has(key) || !isSafeText(r.color[key], 128)) return false;
+    }
+    if (Object.keys(r.color).length === 0) return false;
+  }
+
+  if ('dovi' in r) {
+    if (!isPlainObject(r.dovi) || Object.keys(r.dovi).length === 0) return false;
+    const doviKeys = new Set(['hasDovi', 'dvProfile', 'dvLevel', 'dvCompatId', 'rpuPresent', 'elPresent', 'blPresent', 'hasMdcv', 'hasClli', 'hasHdr10Plus']);
+    const booleanKeys = new Set(['hasDovi', 'rpuPresent', 'elPresent', 'blPresent', 'hasMdcv', 'hasClli', 'hasHdr10Plus']);
+    const integerKeys = new Set(['dvProfile', 'dvLevel', 'dvCompatId']);
+    for (const key of Object.keys(r.dovi)) {
+      if (!doviKeys.has(key)) return false;
+      if (booleanKeys.has(key) && typeof r.dovi[key] !== 'boolean') return false;
+      if (integerKeys.has(key) && (!Number.isSafeInteger(r.dovi[key]) || r.dovi[key] < 0)) return false;
+    }
+    if (r.dovi.hasDovi === false
+      && ['dvProfile', 'dvLevel', 'dvCompatId', 'rpuPresent', 'elPresent', 'blPresent'].some((key) => key in r.dovi)) return false;
+  }
+
+  if ('profileId' in r) {
+    if (typeof r.profileId !== 'string' || !ALLOWED_PROFILES.has(r.profileId)) return false;
+  }
+  const expectedProfile = EXPECTED_PROFILE_BY_CLASSIFICATION[r.classification];
+  if (expectedProfile) {
+    if (r.canConvert !== true || r.profileId !== expectedProfile) return false;
+  } else if (r.canConvert !== false || 'profileId' in r) {
+    return false;
+  }
+
+  if ('sourceId' in r) {
+    if (!allowSourceId || !expectedProfile || typeof r.sourceId !== 'string' || !UUID_RE.test(r.sourceId)) return false;
   }
   return true;
 }
 
-function inspect(userPath) {
+function validateCliResponse(obj) {
+  if (!isPlainObject(obj)) return false;
+  const topKeys = Object.keys(obj);
+  if (obj.outcome === 'error') {
+    return topKeys.length === 2
+      && topKeys.includes('outcome')
+      && topKeys.includes('reason')
+      && isSafeReason(obj.reason);
+  }
+  if (obj.outcome !== 'complete') return false;
+  if (topKeys.length !== 2 || !topKeys.includes('outcome') || !topKeys.includes('result')) return false;
+  // The CLI always returns these evidence fields, including parse-failure results.
+  const result = obj.result;
+  if (!isPlainObject(result) || !('displayName' in result) || !('size' in result) || !('sha256' in result)) return false;
+  return validateInspectionResult(result);
+}
+
+function inspect(userPath, options = {}) {
+  const {
+    abortSignal,
+    timeoutMs = TIMEOUT_MS,
+    stallTimeoutMs = STALL_TIMEOUT_MS,
+    trackProcess,
+    untrackProcess,
+    touchActivity,
+    killProcess,
+  } = options || {};
+  const effectiveTimeoutMs = boundedTimeout(timeoutMs, TIMEOUT_MS);
+  const effectiveStallTimeoutMs = boundedTimeout(stallTimeoutMs, STALL_TIMEOUT_MS);
   return new Promise((resolve) => {
     // Validate python config first
     const py = process.env.HDRTOSDR_PYTHON;
@@ -107,14 +200,21 @@ function inspect(userPath) {
       return;
     }
     const cliPath = path.join(backend.root, 'prototype', 'inspect_cli.py');
-    // Extra validation that cli exists (already)
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let timedOut = false;
+    let stalled = false;
     let killed = false;
+    let settled = false;
+    let timeoutTimer = null;
+    let stallTimer = null;
     const payload = JSON.stringify({ version: 1, path: userPath });
     if (Buffer.byteLength(payload, 'utf8') > MAX_REQUEST_BYTES) {
       resolve({ outcome: 'error', reason: 'invalid_request' });
+      return;
+    }
+    if (abortSignal && abortSignal.aborted) {
+      resolve({ outcome: 'error', reason: 'inspection_failed' });
       return;
     }
 
@@ -126,80 +226,100 @@ function inspect(userPath) {
       return;
     }
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(stallTimer);
+      if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      try { if (untrackProcess) untrackProcess(child); } catch {}
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const killChild = () => {
       try {
-        child.kill('SIGKILL');
+        if (killProcess) killProcess(child);
+        else child.kill('SIGKILL');
       } catch {}
-    }, TIMEOUT_MS);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      killed = true;
+      killChild();
+      finish({ outcome: 'error', reason: 'inspection_failed' });
+    };
+    const activity = () => {
+      if (settled) return;
+      try { if (touchActivity) touchActivity(); } catch {}
+      clearTimeout(stallTimer);
+      if (effectiveStallTimeoutMs > 0) {
+        stallTimer = setTimeout(() => {
+          stalled = true;
+          killChild();
+          finish({ outcome: 'error', reason: 'inspection_failed' });
+        }, effectiveStallTimeoutMs);
+      }
+    };
+
+    try { if (trackProcess) trackProcess(child); } catch {}
+    if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+    if (effectiveTimeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        killChild();
+        finish({ outcome: 'error', reason: 'inspection_failed' });
+      }, effectiveTimeoutMs);
+    }
+    activity();
 
     child.stdout.on('data', (chunk) => {
+      activity();
       if (stdout.length + chunk.length > MAX_STDOUT) {
-        // cap: kill and generic error
-        if (!killed) {
-          killed = true;
-          try { child.kill('SIGKILL'); } catch {}
-        }
+        killed = true;
+        killChild();
+        finish({ outcome: 'error', reason: 'inspection_failed' });
         return;
       }
       stdout = Buffer.concat([stdout, chunk]);
     });
 
     child.stderr.on('data', (chunk) => {
-      if (stderr.length + chunk.length > MAX_STDERR) {
-        // cap but don't expose
-        return;
-      }
-      stderr = Buffer.concat([stderr, chunk]);
+      activity();
+      if (stderr.length + chunk.length <= MAX_STDERR) stderr = Buffer.concat([stderr, chunk]);
     });
 
-    child.on('error', () => {
-      clearTimeout(timer);
-      resolve({ outcome: 'error', reason: 'inspection_failed' });
-    });
-
+    child.on('error', () => finish({ outcome: 'error', reason: 'inspection_failed' }));
     child.on('close', () => {
-      clearTimeout(timer);
-      if (timedOut) {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
+      if (settled) return;
+      if (timedOut || stalled || killed) {
+        finish({ outcome: 'error', reason: 'inspection_failed' });
         return;
       }
-      if (killed) {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
-        return;
-      }
-      // Expect stdout to be JSON
-      if (!stdout || stdout.length === 0) {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
-        return;
-      }
-      if (stdout.length > MAX_STDOUT) {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
+      if (!stdout || stdout.length === 0 || stdout.length > MAX_STDOUT) {
+        finish({ outcome: 'error', reason: 'inspection_failed' });
         return;
       }
       let parsed;
-      try {
-        parsed = JSON.parse(stdout.toString('utf8'));
-      } catch {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
+      try { parsed = JSON.parse(stdout.toString('utf8')); } catch {
+        finish({ outcome: 'error', reason: 'inspection_failed' });
         return;
       }
       if (!validateCliResponse(parsed)) {
-        resolve({ outcome: 'error', reason: 'inspection_failed' });
+        finish({ outcome: 'error', reason: 'inspection_failed' });
         return;
       }
-      // Map to renderer-safe shape: ensure no path leakage (already validated)
-      resolve(parsed);
+      finish(parsed);
     });
 
-    // Feed stdin
     try {
       child.stdin.write(payload, 'utf8');
       child.stdin.end();
     } catch {
-      clearTimeout(timer);
-      try { child.kill('SIGKILL'); } catch {}
-      resolve({ outcome: 'error', reason: 'inspection_failed' });
+      killed = true;
+      killChild();
+      finish({ outcome: 'error', reason: 'inspection_failed' });
     }
   });
 }
@@ -211,7 +331,10 @@ module.exports = {
   getRepoRoot,
   resolveBackendRoot,
   validateCliResponse,
+  validateInspectionResult,
+  isSafeReason,
   inspect,
   MAX_REQUEST_BYTES,
   TIMEOUT_MS,
+  STALL_TIMEOUT_MS,
 };

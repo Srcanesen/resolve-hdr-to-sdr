@@ -76,6 +76,8 @@ class InspectionEvidence:
     duration: Optional[str] = None
     r_frame_rate: Optional[str] = None
     avg_frame_rate: Optional[str] = None
+    # Codec level (ffprobe's integer level_idc, e.g. 120 for HEVC level 4.0)
+    level: Optional[int] = None
     # Dolby
     dv_profile: Optional[int] = None
     dv_level: Optional[int] = None
