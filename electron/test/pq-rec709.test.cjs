@@ -145,9 +145,9 @@ test('outputStore buildDisplayName routes by pq profile', () => {
 
 test('inspection-adapter validateCliResponse accepts pqSupported', () => {
   const adapter = require('../inspection-adapter.cjs');
-  const goodPq = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'pq-rec709-v1' } };
+  const goodPq = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'pq-rec709-v1', duration: 1 } };
   assert.equal(adapter.validateCliResponse(goodPq), true);
-  const goodHlg = { outcome: 'complete', result: { displayName: 'b.mov', size: 123, sha256: 'b'.repeat(64), classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1' } };
+  const goodHlg = { outcome: 'complete', result: { displayName: 'b.mov', size: 123, sha256: 'b'.repeat(64), classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1', duration: 1 } };
   assert.equal(adapter.validateCliResponse(goodHlg), true);
   const bad = { outcome: 'complete', result: { displayName: 'c.mov', size: 123, sha256: 'c'.repeat(64), classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'unknown' } };
   assert.equal(adapter.validateCliResponse(bad), false);
@@ -157,7 +157,7 @@ test('inspection-adapter validateCliResponse accepts pqSupported', () => {
 
 test('ipc-contract isValidResponse accepts pqSupported pairing', () => {
   const { isValidResponse } = require('../ipc-contract.cjs');
-  const okPq = { outcome: 'complete', result: { classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'pq-rec709-v1' } };
+  const okPq = { outcome: 'complete', result: { classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'pq-rec709-v1', duration: 1 } };
   assert.equal(isValidResponse(okPq), true);
   const badPq = { outcome: 'complete', result: { classification: 'pqSupported', reason: 'pq_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1' } };
   assert.equal(isValidResponse(badPq), false);
@@ -197,6 +197,7 @@ test('ipc-contract attachIpc mints token for pqSupported', async () => {
         reason: 'pq_metadata_match',
         canConvert: true,
         profileId: PROFILE_ID_PQ,
+        duration: 1,
         displayName: 'pq.mov',
         size: 12345,
         sha256: 'f'.repeat(64),
@@ -359,7 +360,7 @@ test('renderer eligibility and copy for pq path', () => {
   const uuid = crypto.randomUUID();
   assert.equal(helpers.isEligibleResult({ classification: 'pqSupported', canConvert: true, sourceId: uuid, profileId: 'pq-rec709-v1' }), true);
   assert.equal(helpers.isEligibleResult({ classification: 'pqHdr10Unsupported', canConvert: false, sourceId: uuid }), false);
-  const fieldsPq = helpers.buildSafeTechnicalFields({ classification: 'pqSupported', size: 12345, duration: '12.3' });
+  const fieldsPq = helpers.buildSafeTechnicalFields({ classification: 'pqSupported', size: 12345, duration: 12.3 });
   assert.ok(fieldsPq.some(f => f.label === 'Format' && f.value === 'PQ / HDR10'));
   const fieldsPqUns = helpers.buildSafeTechnicalFields({ classification: 'pqHdr10Unsupported', size: 12345 });
   assert.ok(fieldsPqUns.some(f => f.label === 'Format' && f.value === 'PQ / HDR10'));
@@ -374,23 +375,35 @@ test('verifier script supports pq profile and rejects HDR frame side data', () =
   const scriptPath = path.resolve(__dirname, '../../scripts/verify-spike.sh');
   const src = fs.readFileSync(scriptPath, 'utf8');
   assert.ok(src.includes('pq-rec709-v1'));
-  assert.ok(src.includes('-read_intervals "%+#1"'));
+  assert.ok(src.includes('-read_intervals "0%+1"'));
+  assert.equal(src.includes('-read_intervals "%+#1"'), false);
   for (const token of ['Mastering display metadata', 'Content light level metadata', 'HDR10+', 'DOVI', 'HDR Vivid', 'Ambient viewing environment']) {
     assert.ok(src.toLowerCase().includes(token.toLowerCase()), `verifier must detect ${token}`);
   }
   assert.match(src, /forbidden HDR frame side data/);
   assert.ok(src.includes('case \"$EXPECTED_PROFILE\" in'));
   assert.ok(src.includes('unknown profile'));
-  assert.ok(src.includes('bt2020nc'));
-  assert.ok(src.includes('smpte2084'));
-  assert.ok(src.includes('has_mdcv') || src.includes('hasMdcv') || src.includes('MDCV'));
-  assert.ok(src.includes('has_dovi') || src.includes('hasDovi'));
-  assert.ok(src.includes('has_hdr10plus') || src.includes('hasHdr10Plus') || src.includes('hdr10plus'));
+  assert.ok(src.includes('verify_contract.py" source'));
+  assert.ok(src.includes('-select_streams V:0'));
+  assert.equal(src.includes('-select_streams v:0'), false);
   assert.ok(src.includes('com[.]apple[.]quicktime'));
   assert.ok(src.includes('bt709'));
   assert.equal(src.includes('eval '), false);
   assert.ok(src.includes('source and output resolve to the same path'));
-  assert.ok(src.includes('read_intervals') || src.includes('%+#1'));
+  assert.ok(src.includes('read_intervals') && src.includes('0%+1'));
+});
+
+test('inspector and verifier both use one-second bounded interval 0%+1', () => {
+  const verifierSrc = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-spike.sh'), 'utf8');
+  const inspectorSrc = fs.readFileSync(path.resolve(__dirname, '../../prototype/inspector.py'), 'utf8');
+  // Both must use the one-second interval 0%+1 and uppercase V:0, never packet-count %+#1 for initial evidence
+  assert.ok(verifierSrc.includes('-read_intervals "0%+1"'));
+  assert.ok(inspectorSrc.includes('"0%+1"'));
+  assert.ok(verifierSrc.includes('-select_streams V:0'));
+  assert.ok(inspectorSrc.includes('"V:0"'));
+  // Ensure no stale packet-count interval remains in current verifier/inspector (research docs are historical only)
+  assert.equal(verifierSrc.includes('-read_intervals "%+#1"'), false);
+  assert.equal(inspectorSrc.includes('%+#1'), false);
 });
 
 const knownSource = '/tmp/212724_5s_excerpt.mp4';
@@ -400,7 +413,12 @@ const knownLeakyOutput = path.join(
   'HdrToSdr',
   '212724_5s_excerpt_sdr_rec709_h264_pq-rec709-v1.mp4',
 );
-test('verifier rejects the confirmed leaky PQ output artifact', { skip: !(fs.existsSync(knownSource) && fs.existsSync(knownLeakyOutput)) }, () => {
+const leakyPqSkipReason = process.env.HDRTOSDR_RUN_LIVE_SAMPLES !== '1'
+  ? 'live media artifact validation is opt-in; normal checks do not use external media'
+  : !(fs.existsSync(knownSource) && fs.existsSync(knownLeakyOutput))
+    ? 'confirmed leaky PQ media artifact is absent'
+    : false;
+test('verifier rejects the confirmed leaky PQ output artifact', { skip: leakyPqSkipReason }, () => {
   const scriptPath = path.resolve(__dirname, '../../scripts/verify-spike.sh');
   const result = spawnSync(scriptPath, [knownSource, knownLeakyOutput, 'pq-rec709-v1'], { encoding: 'utf8' });
   assert.notEqual(result.status, 0, 'the obsolete output must fail the HDR side-data gate');

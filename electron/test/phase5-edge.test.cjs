@@ -142,24 +142,96 @@ test('BUG-034 output records expire and remain bounded', () => {
   }
 });
 
-test('BUG-027 bundle audit hashes in chunks and rejects unexpected files and symlink cycles', () => {
+function makeSyntheticDarwinProbe(calls, dependencyFor = () => '@rpath/libportable.dylib') {
+  return (command, args, options) => {
+    calls.push({ command, args, options });
+    const target = args[args.length - 1];
+    const relative = target.split(`${path.sep}bundle-root${path.sep}`)[1] || path.basename(target);
+    if (command === 'file') {
+      return 'Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit] [arm64:Mach-O 64-bit]';
+    }
+    if (command === 'lipo') return 'x86_64 arm64';
+    if (command === 'otool') return `${target}:\n\t${dependencyFor(relative)} (compatibility version 1.0.0, current version 1.0.0)\n`;
+    if (command === 'codesign' && args[0] === '--verify') return '';
+    if (command === 'codesign') return 'Identifier=com.blackmagic-design.WorkflowIntegration\nTeamIdentifier=9ZGFBWLSYP\n';
+    throw new Error(`unexpected probe ${command}`);
+  };
+}
+
+test('BUG-025 bundle portability gate accepts synthetic universal relocatable Mach-O output', () => {
+  assert.deepEqual(bundleAudit.parseFileArchitectures('Mach-O universal binary with 2 architectures: [x86_64:Mach-O] [arm64:Mach-O]'), ['x86_64', 'arm64']);
+  assert.deepEqual(bundleAudit.parseLipoArchitectures('x86_64 arm64'), ['x86_64', 'arm64']);
+  assert.deepEqual(bundleAudit.parseOtoolDependencies('binary:\n\t@rpath/libportable.dylib (compatibility version 1.0.0, current version 1.0.0)'), ['@rpath/libportable.dylib']);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('/usr/lib/libSystem.B.dylib'), true);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('/System/Library/Frameworks/Foundation.framework/Foundation'), true);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('@loader_path/libportable.dylib'), true);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('@executable_path/libportable.dylib'), true);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('/opt/homebrew/lib/libavcodec.dylib'), false);
+  assert.equal(bundleAudit.isAllowedDarwinDylibDependency('libnot-relocatable.dylib'), false);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-bundle-audit-'));
+  const calls = [];
   try {
     for (const relative of bundleAudit.BUNDLE_FILE_ALLOWLIST) {
       const target = path.join(tmp, relative);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, relative === 'WorkflowIntegration.node' ? Buffer.from([1, 2, 3]) : 'runtime');
     }
-    assert.equal(bundleAudit.auditBundle(tmp).ok, true);
+    const result = bundleAudit.auditBundle(tmp, bundleAudit.BUNDLE_FILE_ALLOWLIST, {
+      platform: 'darwin',
+      execFileSync: makeSyntheticDarwinProbe(calls),
+      workflowIntegrationHashFile: () => bundleAudit.WORKFLOW_INTEGRATION_SHA256,
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(calls.length, 11, 'file, lipo, otool, and node provenance probes must be bounded');
+    assert.ok(calls.every(({ args, options }) => Array.isArray(args) && options.shell === false));
     assert.equal(bundleAudit.sha256File(path.join(tmp, 'package.json')), crypto.createHash('sha256').update('runtime').digest('hex'));
 
     fs.writeFileSync(path.join(tmp, 'electron', 'unexpected.cjs'), 'no');
-    assert.equal(bundleAudit.auditBundle(tmp).ok, false);
+    assert.equal(bundleAudit.auditBundle(tmp, bundleAudit.BUNDLE_FILE_ALLOWLIST, {
+      platform: 'darwin',
+      execFileSync: makeSyntheticDarwinProbe([]),
+      workflowIntegrationHashFile: () => bundleAudit.WORKFLOW_INTEGRATION_SHA256,
+    }).ok, false);
     fs.rmSync(path.join(tmp, 'electron', 'unexpected.cjs'));
     fs.symlinkSync('..', path.join(tmp, 'electron', 'cycle'));
-    const audited = bundleAudit.auditBundle(tmp);
+    const audited = bundleAudit.auditBundle(tmp, bundleAudit.BUNDLE_FILE_ALLOWLIST, {
+      platform: 'darwin',
+      execFileSync: makeSyntheticDarwinProbe([]),
+      workflowIntegrationHashFile: () => bundleAudit.WORKFLOW_INTEGRATION_SHA256,
+    });
     assert.equal(audited.ok, false);
     assert.match(audited.reason, /symlink/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('BUG-025 bundle portability gate rejects thin tools and absolute non-system dylibs', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-portability-gate-'));
+  try {
+    for (const relative of bundleAudit.BUNDLE_FILE_ALLOWLIST) {
+      const target = path.join(tmp, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'runtime');
+    }
+    const result = bundleAudit.auditBundle(tmp, bundleAudit.BUNDLE_FILE_ALLOWLIST, {
+      platform: 'darwin',
+      execFileSync: (command, args) => {
+        const relative = args[args.length - 1].split(`${path.sep}bundle-root${path.sep}`)[1] || '';
+        if (command === 'file') return 'Mach-O 64-bit executable arm64';
+        if (command === 'lipo') return 'arm64';
+        if (command === 'otool') return `${args[args.length - 1]}:\n\t/opt/homebrew/lib/libavcodec.dylib (compatibility version 1.0.0, current version 1.0.0)\n`;
+        if (command === 'codesign' && args[0] === '--verify') return '';
+        if (command === 'codesign') return 'Identifier=com.blackmagic-design.WorkflowIntegration\nTeamIdentifier=9ZGFBWLSYP\n';
+        throw new Error(`unexpected probe ${command} ${relative}`);
+      },
+      workflowIntegrationHashFile: () => bundleAudit.WORKFLOW_INTEGRATION_SHA256,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /darwin portability/);
+    assert.match(result.reason, /x86_64.*arm64|arm64.*x86_64/);
+    assert.match(result.reason, /non-system absolute dylib/);
+    assert.doesNotMatch(result.reason, /opt\/homebrew/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

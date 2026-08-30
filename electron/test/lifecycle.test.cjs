@@ -12,6 +12,10 @@ function createMockApp() {
       if (!handlers[evt]) handlers[evt] = [];
       handlers[evt].push(fn);
     },
+    removeListener: (evt, fn) => {
+      if (!handlers[evt]) return;
+      handlers[evt] = handlers[evt].filter((candidate) => candidate !== fn);
+    },
     removeAllListeners: (evt) => {
       if (evt) delete handlers[evt];
       else for (const k in handlers) delete handlers[k];
@@ -119,7 +123,10 @@ test('lifecycle ordered Initialize -> SetAPITimeout(10) -> RegisterCallback and 
   assert.equal(res.ok, true);
   const activeService = main._getConversionServiceForTest();
   assert.ok(activeService && typeof activeService.trackProcess === 'function');
-  const child = { killed: [], kill(signal) { this.killed.push(signal); } };
+  const child = { killed: [], kill(signal) {
+    this.killed.push(signal);
+    if (signal === 'SIGTERM') this.exitCode = 0;
+  } };
   activeService.trackProcess(child);
   assert.deepEqual(callOrder.slice(0,3), [
     'Initialize:com.hdrtosdr.app',
@@ -133,11 +140,16 @@ test('lifecycle ordered Initialize -> SetAPITimeout(10) -> RegisterCallback and 
   // Simulate before-quit twice
   const beforeQuitHandlers = appMock._handlers['before-quit'] || [];
   assert.ok(beforeQuitHandlers.length >= 1, 'before-quit handler registered');
-  // Emit before-quit twice
-  appMock.emit('before-quit');
-  appMock.emit('before-quit');
-  assert.deepEqual(child.killed, ['SIGKILL'], 'app quit must kill tracked child processes');
+  // Emit before-quit twice while the first bounded cleanup is in flight.
+  let prevented = 0;
+  const quitEvent = { preventDefault: () => { prevented++; } };
+  appMock.emit('before-quit', quitEvent);
+  appMock.emit('before-quit', quitEvent);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(prevented, 1, 'before-quit must prevent default exactly once');
+  assert.deepEqual(child.killed, ['SIGTERM'], 'app quit must terminate tracked child processes');
   assert.equal(wi._cleanupCount, 1, 'CleanUp must be called exactly once even if before-quit emitted twice');
+  assert.equal((appMock._handlers['before-quit'] || []).length, 0, 'owned before-quit handler is removed before quit resumes');
 
   // Plugin window close quits app
   assert.ok(mockWindow._on && mockWindow._on['close'], 'window close handler should be registered');

@@ -1,0 +1,7 @@
+{
+  "resolveVersion": "21.0.3",
+  "sdkPath": "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node",
+  "sha256": "91705298c56b649a75bf76be101fea28fbe41b1e88adf4778490ce8b2d14b3e2",
+  "identifier": "com.blackmagic-design.WorkflowIntegration",
+  "teamIdentifier": "9ZGFBWLSYP"
+}

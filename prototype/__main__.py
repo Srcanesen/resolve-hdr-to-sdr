@@ -2,15 +2,22 @@ import argparse
 import signal
 import sys
 import threading
+from pathlib import Path
 from .server import create_server
 
 def main():
     parser = argparse.ArgumentParser(description="HdrToSdr inspection prototype")
     parser.add_argument("--port", type=int, default=8765, help="port to bind (127.0.0.1 only)")
+    parser.add_argument(
+        "--ffprobe",
+        type=Path,
+        default=None,
+        help="explicit absolute ffprobe executable (tests; default is repo-local tools/ffprobe)",
+    )
     args = parser.parse_args()
 
     try:
-        httpd = create_server(args.port)
+        httpd = create_server(args.port, ffprobe_executable=args.ffprobe)
     except Exception as e:
         print(f"Failed to start server: {e}", file=sys.stderr)
         sys.exit(1)

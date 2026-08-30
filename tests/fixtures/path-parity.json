@@ -1,0 +1,6 @@
+[
+  {"name":"same-canonical-path","left":"/private/tmp/HdrToSdr/source.mov","right":"/private/tmp/HdrToSdr/source.mov","darwinEqual":true,"posixEqual":true},
+  {"name":"macos-tmp-alias","left":"/tmp/HdrToSdr/source.mov","right":"/private/tmp/HdrToSdr/source.mov","darwinEqual":true,"posixEqual":false},
+  {"name":"case-collision","left":"/private/tmp/HdrToSdr/source.mov","right":"/private/tmp/hdrtosdr/source.mov","darwinEqual":false,"posixEqual":false},
+  {"name":"component-prefix-not-equal","left":"/private/tmp/HdrToSdr/source.mov","right":"/private/tmp/HdrToSdr-other/source.mov","darwinEqual":false,"posixEqual":false}
+]

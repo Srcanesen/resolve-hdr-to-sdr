@@ -41,7 +41,7 @@ Filesystem/process boundary
 | BUG-004 | CONFIRMED | P0 | Yes | `electron/test/phase1-lifecycle.test.cjs` | Allocation failure releases the reservation. |
 | BUG-005 | CONFIRMED | P0 | Yes | `electron/test/phase1-lifecycle.test.cjs` | Accepted response precedes deferred events. |
 | BUG-006 | CONFIRMED | P0 | Yes | `tests/test_inspector.py` | One source hash plus identity checks; bounded probe. |
-| BUG-007 | PARTIALLY_CONFIRMED | P0 | Partial | `tests/test_inspector.py` | Inspector excludes attached pictures; verifier still uses separate `v:0` selection. |
+| BUG-007 | CONFIRMED | P0 | Yes | `tests/test_inspector.py`, `tests/test_verify_contract.py`, `electron/test/b-executor.test.cjs` | Shared first-real-video policy, uppercase `V:0`/`0:V:0`, and selected-stream frame evidence are enforced across inspection, verification, and mapping. |
 | BUG-008 | CONFIRMED | P0 | Yes | `electron/test/phase3-audit.test.cjs` | SHA/size fingerprint is checked before drag and thumbnail. |
 | BUG-009 | CONFIRMED | P0 | Yes | `electron/test/phase3-audit.test.cjs` | Dimensions, frames, duration and audio contract are checked. |
 | BUG-010 | CONFIRMED | P1 | Yes | `electron/test/phase4-audit.test.cjs` | Exact token boundaries reject `btX2390`. |
@@ -49,19 +49,19 @@ Filesystem/process boundary
 | BUG-012 | CONFIRMED | P1 | Yes | `electron/test/phase4-audit.test.cjs` | Duration-based monotonic progress and bounded parsing. |
 | BUG-013 | CONFIRMED | P1 | Yes | `tests/test_verify_contract.py` | Missing numeric fields fail safely or use format duration. |
 | BUG-014 | CONFIRMED | P1 | Partial | `electron/test/phase3-audit.test.cjs` | Output scan is bounded and documented as evidence, not an unbounded guarantee. |
-| BUG-015 | PARTIALLY_CONFIRMED | P1 | Partial | `tests/test_inspector.py` | Frame evidence is filtered in inspection; verifier re-gate is not fully shared. |
+| BUG-015 | CONFIRMED | P1 | Yes | `tests/test_inspector.py`, `tests/test_verify_contract.py` | Generic HLG/PQ source re-gates reuse normalized stream plus selected-frame evidence and reject frame-only DOVI/HDR10+ markers. |
 | BUG-016 | CONFIRMED | P1 | Yes | `electron/test/phase4-audit.test.cjs` | Oversize/truncated thumbnail data never reaches success. |
-| BUG-017 | PARTIALLY_CONFIRMED | P1 | Partial | `electron/test/phase1-lifecycle.test.cjs` | Watchdogs and quit cleanup exist; no process-group/grace-period evidence. |
+| BUG-017 | CONFIRMED | P1 | Yes | `electron/test/phase1-lifecycle.test.cjs`, `electron/test/process-tree-lifecycle.test.cjs` | Detached owned groups receive one TERM, bounded grace, and conditional KILL; cancel, verifier timeout, and runtime disposal leave no fixture descendants. |
 | BUG-018 | CONFIRMED | P1 | Yes | `electron/test/phase3-audit.test.cjs` | Cleanup warning and bounded scavenging are explicit. |
 | BUG-019 | CONFIRMED | P1 | Yes | `electron/test/conversion-ipc.test.cjs` | Token minting follows canonicalization and failure is safe. |
 | BUG-020 | CONFIRMED | P1 | Yes | `electron/test/phase1-lifecycle.test.cjs` | Inspection and conversion use one coordinator. |
-| BUG-021 | PARTIALLY_CONFIRMED | P1 | Partial | `electron/test/ipc-contract.test.cjs` | Allowlist and integer checks exist; duration remains text-shaped rather than finite numeric. |
+| BUG-021 | CONFIRMED | P1 | Yes | `electron/test/ipc-contract.test.cjs` | IPC duration is absent or a finite positive JSON number; eligible results require it and renderer formatting is numeric-only. |
 | BUG-022 | CONFIRMED | P1 | Yes | `tests/test_inspector.py` | Strict 0/1 boolean parsing fails closed. |
 | BUG-023 | CONFIRMED | P1 | Yes | `tests/test_classifier.py` | HLG level is compared exactly. |
 | BUG-024 | CONFIRMED | P1 | Yes | `electron/test/phase5-edge.test.cjs` | Partial host initialization cleans once and preserves other listeners. |
-| BUG-025 | DEFERRED | P1 | No | `electron/test/phase5-edge.test.cjs` | Bundle audit is mechanical; clean macOS architecture, dylib, codesign and runtime validation remain manual. |
-| BUG-026 | PARTIALLY_CONFIRMED | P1 | Partial | `tests/test_path_boundary.py` | Both boundaries reject unsafe symlinks, but no single cross-language implementation exists. |
-| BUG-027 | CONFIRMED | P2 | No | `tests/test_path_boundary.py` | Lower-case containment fallback remains unsafe on case-sensitive volumes. |
+| BUG-025 | CONFIRMED | P1 | Partial | `electron/test/phase5-edge.test.cjs` | Darwin Mach-O architecture and dylib portability gate is fixed; portable tool provisioning remains deferred. |
+| BUG-026 | CONFIRMED | P1 | Yes | `tests/test_path_boundary.py`, `electron/test/path-policy.test.cjs` | Python/Node canonical path and symlink rules are aligned against one language-neutral parity corpus; runtimes remain independent. |
+| BUG-027 | CONFIRMED | P2 | Yes | `tests/test_path_boundary.py`, `electron/test/path-policy.test.cjs` | Lower-case containment fallback is removed; canonical comparisons are component-wise and case-sensitive except explicit macOS aliases. |
 | BUG-028 | CONFIRMED | P2 | Yes | `electron/test/phase5-edge.test.cjs` | Deterministic doctor gives actionable local-tool failure without fallback. |
 | BUG-029 | CONFIRMED | P2 | Yes | `electron/test/phase3-audit.test.cjs` | Policy is all source audio streams retained as AAC with channel/sample-rate checks. |
 | BUG-030 | CONFIRMED | P2 | Yes | `electron/test/phase3-audit.test.cjs` | Privacy check is semantic metadata inspection, not raw payload `strings`. |
@@ -100,8 +100,8 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 - Reproduction: `electron/test/phase1-lifecycle.test.cjs` uses a never-settling verifier and checks timeout, abort and one terminal event.
 - Root cause: Verifier completion previously depended only on child completion.
 - Fix: Verifier watchdog with safe `verification_timeout`/`verification_stalled` reasons and centralized cleanup.
-- Tests: `electron/test/phase1-lifecycle.test.cjs` pass; `npm run check` reports 121 Python and 181 Electron tests passed.
-- Residual risk: Process-group behavior on a real macOS child tree is not tested.
+- Tests: `electron/test/phase1-lifecycle.test.cjs` pass; `npm run check` reports 146 Python and 216 Electron tests passed, including `electron/test/process-tree-lifecycle.test.cjs` real parent/grandchild coverage.
+- Residual risk: Process-group behavior is covered by `electron/test/process-tree-lifecycle.test.cjs` real parent/grandchild fixtures (TERM, grace, conditional KILL, cancel/verifier-timeout/app-quit disposal); OS-level zombie reaping remains a short-lived platform boundary.
 - External references: https://nodejs.org/api/child_process.html#child_processchild_process_spawn_command_args_options
 
 ## BUG-003 — Eşzamanlı iki `startJob()` çağrısı tek-iş kilidini aşabilir
@@ -154,14 +154,14 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 
 ## BUG-007 — “İlk video karesi” yerine ilk paket taranıyor ve attached picture ana video seçilebilir
 
-- Status: PARTIALLY_CONFIRMED
+- Status: CONFIRMED
 - Severity: P0
-- Evidence: Python inspection uses `-select_streams v`, selects a non-attached default/real video, and filters frame evidence by selected stream index. `scripts/verify-spike.sh` and `electron/verify_contract.py` independently take the first `video`/`v:0` stream.
-- Reproduction: `tests/test_inspector.py` covers stream/frame parsing, but no committed first-audio plus attached-picture fixture was run; the remaining `v:0` policy mismatch is visible in the verifier commands.
-- Root cause: Stream selection was corrected in the inspector but not centralized across inspection and verification.
-- Fix: Inspector-side attached-picture exclusion and selected-stream frame filtering were added; verifier unification remains open.
-- Tests: `tests/test_inspector.py` and `npm run check` pass; the required physical fixture was not available.
-- Residual risk: A cover stream ordered before the main video can still make verifier metadata/timing checks address the wrong stream.
+- Evidence: `prototype/evidence.py` defines the first file-order `codec_type=video` stream with strict `attached_pic != 1` selection; inspector, verifier timing/HDR scans and source re-gates use it, while FFmpeg calls use uppercase `V:0`/`0:V:0`.
+- Reproduction: `tests/test_inspector.py` and `tests/test_verify_contract.py` cover audio-first, attached-picture, default-disposition, and other-video frame metadata; `electron/test/b-executor.test.cjs` covers the conversion map.
+- Root cause: Inspector, verifier and conversion previously had separate default/`v:0` selection behavior.
+- Fix: The pure evidence helper and explicit uppercase selectors now make first-real-video and selected-frame evidence one internal contract; stream index is not exposed to the renderer.
+- Tests: Focused regression tests and `npm run check` pass.
+- Residual risk: FFprobe remains an external executable and malformed probe structures fail closed.
 - External references: https://ffmpeg.org/ffprobe.html#Stream-specifiers
 
 ## BUG-008 — Verified output kimliği dosyanın gerçek içeriğine bağlı olmayabilir
@@ -250,14 +250,14 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 
 ## BUG-015 — Generic HLG kontrolü frame-level Dolby Vision metadata’yı kaçırabilir
 
-- Status: PARTIALLY_CONFIRMED
+- Status: CONFIRMED
 - Severity: P1
-- Evidence: `prototype/inspector.py` filters stream/frame side data to the selected real video and detects DOVI; the generic verifier source re-gate inspects stream side data only.
-- Reproduction: Python inspector tests cover frame-side-data parsing; no verifier fixture with frame-only DOVI was run.
-- Root cause: Inspection and shell verifier use separate evidence extraction paths.
-- Fix: Frame-aware inspection/classification was added; generic verifier frame-aware parity remains incomplete.
-- Tests: `tests/test_inspector.py`, generic HLG tests and `npm run check` pass.
-- Residual risk: A frame-only DOVI marker can evade the generic verifier’s source re-gate if it bypasses the normal inspection path.
+- Evidence: `prototype/evidence.py::extract_evidence` combines selected-stream and selected-frame side data; both generic HLG and PQ source re-gates call the same normalized predicates and reject DOVI/HDR10+ markers found only on selected frames.
+- Reproduction: `tests/test_inspector.py` and `tests/test_verify_contract.py` cover frame-only DOVI/HDR10+ and prove attached/other-video frames cannot inject evidence.
+- Root cause: The shell verifier previously duplicated stream-only metadata extraction instead of using the inspection contract.
+- Fix: `electron/verify_contract.py` imports the pure Python evidence helper, and `scripts/verify-spike.sh` delegates both generic/PQ source re-gates to it.
+- Tests: Focused evidence/re-gate tests and `npm run check` pass.
+- Residual risk: The source scan is bounded by FFprobe’s initial interval; this is an intentional bounded evidence policy.
 - External references: https://ffmpeg.org/ffprobe.html#show-frames
 
 ## BUG-016 — Büyük thumbnail buffer’ı kesilip bozuk JPEG başarıyla döndürülebilir
@@ -274,14 +274,14 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 
 ## BUG-017 — Ana conversion için timeout/stall watchdog ve app-quit cleanup eksik olabilir
 
-- Status: PARTIALLY_CONFIRMED
+- Status: CONFIRMED
 - Severity: P1
-- Evidence: Conversion and verifier operations have total/stall timers, tracked children and `dispose()` cleanup; `HeavyOperationCoordinator` kills tracked children on app quit.
-- Reproduction: `electron/test/phase1-lifecycle.test.cjs` covers converter stall/timeout and disposal of tracked processes.
-- Root cause: The old conversion path had no bounded inactivity or quit ownership.
-- Fix: Shared operation policy, abort controllers, process tracking, watchdogs and startup staging scavenging.
-- Tests: `electron/test/phase1-lifecycle.test.cjs` and final `npm run check` pass.
-- Residual risk: No grace-period/process-group kill implementation or real child-tree test is present.
+- Evidence: Inspector, converter, verifier, capability probes, and thumbnails spawn with `detached:true`, `shell:false`; coordinator-owned groups receive exactly one SIGTERM, a configurable bounded grace, and SIGKILL only when the owned group remains alive. Direct-child fallback is used only when POSIX group/PID proof is unavailable and never emits a negative PID on Windows.
+- Reproduction: `electron/test/process-tree-lifecycle.test.cjs` uses real parent/grandchild fixtures for graceful TERM, TERM-ignoring escalation, converter cancellation, verifier timeout, app-quit disposal, repeated termination, and timer/map cleanup. `electron/test/phase1-lifecycle.test.cjs` retains watchdog and terminal-event coverage.
+- Root cause: The previous path tracked direct children but had no process-group ownership or grace-period escalation, so shell descendants could survive.
+- Fix: `HeavyOperationCoordinator` now owns per-child lifecycle records, listener/timer cleanup, idempotent TERM→grace→conditional KILL, and awaitable bounded disposal. All coordinator-owned spawns are enrolled; standalone capability/inspection/conversion paths use the same bounded fallback coordinator.
+- Tests: Focused BUG-017 lifecycle tests and final `npm run check` pass; normal tests never launch Resolve.
+- Residual risk: A process that is not created and enrolled through these internal spawn seams is outside the coordinator's ownership proof; OS-level process accounting can still report a short-lived zombie until reaped.
 - External references: https://nodejs.org/api/child_process.html#child_processsubprocesskillsignal
 
 ## BUG-018 — Commit sonrası staging unlink hatası gizlenebilir
@@ -322,14 +322,14 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 
 ## BUG-021 — IPC/Python response doğrulaması fazla yüzeysel olabilir
 
-- Status: PARTIALLY_CONFIRMED
+- Status: CONFIRMED
 - Severity: P1
-- Evidence: `inspection-adapter.cjs` validates allowlisted keys, SHA-256, safe size, text, enums, nested color/DOVI fields and privacy-safe reasons; duration is currently validated as bounded text.
-- Reproduction: `electron/test/ipc-contract.test.cjs` covers malformed/extra response fields and privacy rejection.
-- Root cause: The original response boundary lacked complete nested schema and privacy checks.
-- Fix: Allowlist validators and fail-closed enum/integer/text checks were added.
-- Tests: `electron/test/ipc-contract.test.cjs`, `tests/test_inspect_cli.py` and `npm run check` pass.
-- Residual risk: A syntactically safe non-numeric duration string can pass this boundary and fail later as an invalid media contract.
+- Evidence: `inspection-adapter.cjs` now accepts duration only when it is absent or a finite positive JSON number; every convertible classification requires that numeric field. Renderer formatting occurs only at the UI edge.
+- Reproduction: `electron/test/ipc-contract.test.cjs` rejects missing, string, NaN, Infinity, zero and negative durations while accepting an ordinary positive number.
+- Root cause: Duration was emitted and validated as display-oriented text rather than a typed boundary value.
+- Fix: Inspector normalization emits a positive numeric duration, IPC validators enforce the typed contract, and renderer formatting no longer parses strings.
+- Tests: `electron/test/ipc-contract.test.cjs`, `tests/test_verify_contract.py`, `tests/test_inspect_cli.py` and `npm run check` pass.
+- Residual risk: Containers without a usable duration remain intentionally non-convertible/fail closed.
 - External references: None.
 
 ## BUG-022 — Python `bool("0")` yanlış DOVI flag’i üretebilir
@@ -370,38 +370,39 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 
 ## BUG-025 — “Self-contained bundle” taşınabilirlik doğrulaması eksik olabilir
 
-- Status: DEFERRED
+- Status: CONFIRMED
 - Severity: P1
-- Evidence: `scripts/bundle-audit.cjs` and the build script check allowlist, regular files, symlinks, hashes and developer-path leakage, but do not perform clean-machine `file`/`otool`/`codesign`/architecture/runtime checks.
-- Reproduction: `electron/test/phase5-edge.test.cjs` covers the mechanical bundle audit; no clean macOS or signed distribution run exists in this worktree.
-- Root cause: Those checks require a clean target macOS environment, provisioned SDK/tool binaries and signing context unavailable here.
-- Fix: Mechanical allowlist/chunk-audit and fail-visible missing-input behavior were added; physical validation is deferred.
-- Tests: `electron/test/phase5-edge.test.cjs` passes; clean macOS validation was not run.
-- Residual risk: Intel/Apple Silicon compatibility, dylib/rpath, codesign and MoltenVK runtime behavior remain unverified.
+- Fixed: Partial
+- Evidence: The reproduced Darwin bundle contains a universal `WorkflowIntegration.node` (`file`: `Mach-O universal binary with 2 architectures` with `x86_64` and `arm64`; `lipo -archs`: `x86_64 arm64`) with `codesign --verify --deep --strict` **PASS** as `Developer ID Application: Blackmagic Design Inc (9ZGFBWLSYP)` (`Authority=Developer ID Certification Authority`, `flags=0x20000(runtime)`). In contrast, both `tools/ffmpeg` and `tools/ffprobe` are thin `arm64` Mach-O binaries (`file`: `Mach-O 64-bit executable arm64`; `lipo -archs`: `arm64`) with ad-hoc signatures (`CodeDirectory flags=0x2(adhoc)`) and `otool -L` reports **83 dylib dependencies each**, including absolute `/opt/homebrew/...` paths such as `/opt/homebrew/Cellar/ffmpeg-full/9.0.1_1/lib/libavcodec.63.dylib` and `/opt/homebrew/opt/libxcb/lib/libxcb.1.dylib`. Parent-observed bounded `file`/`lipo`/`otool`/`codesign` confirms local `codesign --verify` passes for the node but the current `ffmpeg`/`ffprobe` remain **NOT self-contained / NOT Intel-portable**.
+- Reproduction: The prior allowlist audit passed the real bundle despite those observations. `electron/test/phase5-edge.test.cjs` now injects synthetic `file`/`lipo`/`otool -L` output and covers both a universal relocatable pass and thin/absolute-dependency rejection without Mach-O fixtures. Bounded `npm run bundle:resolve` now deterministically fails closed on the current tools, with sanitized reason.
+- Root cause: The audit checked file shape, hashes and text leakage but never inspected Mach-O slices or load commands, so dereferencing a tool symlink falsely looked self-contained.
+- Fix: `scripts/bundle-audit.cjs` now fails closed on Darwin unless `WorkflowIntegration.node`, `tools/ffmpeg`, and `tools/ffprobe` are Mach-O binaries containing both `x86_64` and `arm64`; only `/usr/lib`, `/System/Library`, and `@rpath`/`@loader_path`/`@executable_path` dependencies are accepted. Probes use bounded `execFileSync` argument arrays with `shell:false`, and parser/runner seams remain injectable. The audit gate is fixed, but portable universal/relocatable tools are still **BLOCKED/DEFERRED**; no binaries were downloaded, installed, or changed.
+- Tests: `electron/test/phase5-edge.test.cjs` covers the gate; `npm run bundle:resolve` is expected to fail deterministically on the current arm64 Homebrew tools.
+- Residual risk: A passing portability audit is mechanical — local `codesign --verify` is not a clean-host proof. Codesign/notarization and actual Intel/Apple Silicon/MoltenVK runtime behavior still require separate validation after portable universal tools are provisioned.
 - External references: https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution
 
 ## BUG-026 — Inspection ve conversion symlink politikası farklı olabilir
 
-- Status: PARTIALLY_CONFIRMED
+- Status: CONFIRMED
 - Severity: P1
-- Evidence: `electron/source-path-policy.cjs` and `prototype/path_boundary.py` both reject final/parent symlinks except documented macOS aliases; Electron conversion revalidates the same canonical identity.
-- Reproduction: `tests/test_path_boundary.py` and Electron IPC/path tests cover rejection behavior; no cross-language property corpus exists.
-- Root cause: Two language boundaries implement equivalent policy separately rather than calling one shared policy module.
-- Fix: Shared policy rules were aligned and conversion revalidation uses the Electron policy; full single-source parity remains open.
-- Tests: `tests/test_path_boundary.py`, Electron path tests and `npm run check` pass.
-- Residual risk: Future edits could make the Python and JavaScript policy implementations drift.
+- Evidence: `electron/source-path-policy.cjs` and `prototype/path_boundary.py` reject final/parent symlinks except documented macOS aliases and compare resolved canonical components case-sensitively. Conversion revalidates the same identity.
+- Reproduction: `tests/test_path_boundary.py` and `electron/test/path-policy.test.cjs` consume the same `tests/fixtures/path-parity.json` corpus for alias, case and component-prefix cases; no runtime calls across languages are used.
+- Root cause: The two implementations had no executable parity contract.
+- Fix: A small language-neutral JSON corpus and parallel parity tests now pin equivalent normalization/equality behavior while keeping Python and Node independent.
+- Tests: Python/Node path-policy tests and `npm run check` pass.
+- Residual risk: Filesystem-specific symlink behavior beyond the explicit macOS aliases still depends on each host OS.
 - External references: https://docs.python.org/3/library/pathlib.html#pathlib.Path.resolve
 
 ## BUG-027 — Case-insensitive containment fallback’i case-sensitive volume’da yanlış olabilir
 
 - Status: CONFIRMED
 - Severity: P2
-- Evidence: `prototype/path_boundary.py::_is_within` falls back to lower-case string prefix comparison after `Path.relative_to()` fails, without checking filesystem case sensitivity.
-- Reproduction: Code inspection identifies a sibling-root case collision on a case-sensitive volume; no such volume fixture is present.
-- Root cause: A macOS case-insensitive compatibility fallback is applied as a universal containment rule.
-- Fix: No code change was made in this report-only scope.
-- Tests: `tests/test_path_boundary.py` passes existing cases; the required case-sensitive-volume test remains absent.
-- Residual risk: A differently cased sibling path can be classified as inside the sample root on a case-sensitive filesystem.
+- Evidence: Canonical containment now uses component-wise `Path.relative_to()` only; Python/Node canonical equality preserves case after resolution and rewrites only explicit macOS aliases.
+- Reproduction: `tests/test_path_boundary.py` and `electron/test/path-policy.test.cjs` reject a differently cased sibling and a component-prefix collision from the shared parity corpus.
+- Root cause: A lower-case macOS compatibility fallback had been applied as a universal containment rule.
+- Fix: The fallback was removed; alias handling is explicit and case-sensitive everywhere else.
+- Tests: Path regression tests and `npm run check` pass.
+- Residual risk: None known for the implemented canonical component policy.
 - External references: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/FileSystemDetails/FileSystemDetails.html
 
 ## BUG-028 — Fresh clone için tool setup akışı tam otomatik olmayabilir
@@ -560,15 +561,26 @@ No additional `NEW-###` finding is reported: the remaining observations are reco
 - Residual risk: No multi-gigabyte binary stress run was performed.
 - External references: https://nodejs.org/api/crypto.html#cryptocreatehashalgorithm
 
-## Fiziksel/manual deferrals
+## Fiziksel/manual deferrals — Final no-GUI bounded kanıtı sonrası güncel
 
-- Gerçek Resolve Workflow Integration host smoke (Initialize/drag to Media Pool and timeline) yapılmadı; yalnızca fake lifecycle ve IPC testleri çalıştırıldı.
-- Temiz macOS üzerinde `file`, `otool -L`, architecture matrix, codesign/notarization, MoltenVK/libplacebo runtime ve gerçek tool provisioning doğrulaması yapılmadı. Bu, BUG-025’in açık `DEFERRED` sonucudur.
-- Kalibre Rec.709 ekranda gerçek HDR medya görsel A/B doğrulaması yapılmadı; mekanik metadata/timing doğrulaması görsel doğruluk iddiası değildir.
+- **Gerçek Resolve Workflow Integration host smoke (GUI):** `Initialize('com.hdrtosdr.app')` → panel lifecycle ve `webContents.startDrag` → Media Pool/timeline drop yalnızca canlı Studio GUI'de doğrulanır. Mevcut kapsamda yalnızca fake lifecycle ve IPC testleri koştu; GUI paneli ise ayrı geçmiş koşumda `Workspace → Workflow Integrations` altında başarıyla açılmıştı — headless bridge deneyi bu GUI kanıtının yerini tutmaz.
+- **Headless WorkflowIntegration bridge (undocumented, bounded deney — PARTIAL/NOT SUPPORTED):** Parent tarafından sahip olunan Resolve `-nogui` child'a karşı iki bounded koşum yapıldı (repo Electron **41.10.3** ve Resolve-bundled Electron, kurulu resmi `WorkflowIntegration.node`). Her ikisinde `Initialize('com.hdrtosdr.app')` **true**, ancak `SetAPITimeout`, `GetResolve`, `CleanUp` **başarısız**; her iki koşum da sahip olunan child'ı temizledi (**Resolve residue 0**, fuscript residue 0). Dokümansız sınır; **GUI host'ta ürün hatası olarak sınıflandırılmaz** — headless bridge davranışı ayrı bounded olgudur (`docs/no-gui-validation-research-2026-08-29.md:§7.2`).
+- **Gerçek HLG pipeline (mekanik vs görsel ayrımı):** `Sample/1.MOV` üzerinde bounded no-GUI pipeline koşusu **mechanical PASS** verdi — inspector `hlgKnownLocal` / `hlg-local-b-v1`, gerçek `b-executor` conversion başarılı, verifier `exit 0/PASS` (source SHA + Rec.709 tags), temp çıktı silindi. Bu **mekanik yerel pipeline** kanıtıdır; kalibre Rec.709 ekranda görsel A/B doğrulaması hâlâ **deferred/human visual** olup mekanik doğrulama görsel kabul yerine geçmez (`docs/no-gui-validation-research-2026-08-29.md:§7.1`).
+- **Portable bundle / clean-host:** `WorkflowIntegration.node` universal `x86_64+arm64`, Developer ID team `9ZGFBWLSYP`, `codesign --verify --deep --strict` **PASS** (yerel doğrulama, exact pinned SHA provenance). `tools/ffmpeg` ve `tools/ffprobe` her biri **arm64-only**, ad-hoc (`flags=0x2(adhoc)`) ve **`otool -L` ile 83 dylib** bağımlılığı arasında absolute `/opt/homebrew/...` yolları var. Yeni audit Darwin gate'i ile **fail-closed** reddeder; mevcut bundle **NOT self-contained / NOT Intel-portable** — expected fail only due to arm64/Homebrew non-portable tools. Portable universal/relocatable tool provisioning, codesign/notarization, MoltenVK/libplacebo runtime ve clean-host doğrulaması **blocked/deferred** (BUG-025); portable candidate is non-release and binary gate stays unchecked; no binary readiness claimed; komutlar bounded, residue 0.
+- Tüm komutlar bounded, temp dosyalar ve yalnızca sahip olunan Resolve child yönetildi.
 
 ## Doğrulama
 
-- `npm run check` — PASS; parent-verified sonuç: Python 121, Electron 181.
+- `npm run check` — PASS; 146 Python and 216 Electron tests pass, including `electron/test/process-tree-lifecycle.test.cjs` real parent/grandchild coverage (corrects stale 121/181 and any claim that process-tree tests weren't run), plus synthetic BUG-025 portability cases and offline BUG-017 lifecycle tests.
+- `node --test electron/test/process-tree-lifecycle.test.cjs electron/test/lifecycle.test.cjs electron/test/phase1-lifecycle.test.cjs` — PASS; detached owned groups receive one TERM, bounded grace, conditional KILL; cancel, verifier timeout, and app-quit disposal leave no fixture descendants.
+- `npm run guard:repo` — PASS; scans current tracked plus full-history patch content; a prospective snapshot including all non-ignored files also passed (bounded `file`/`lipo`/`otool`/`codesign` probes, `shell:false`).
+- `npm audit --audit-level=high` — PASS; 0 vulnerabilities.
 - `npm run doctor` — PASS; repo-local `ffmpeg` ve `ffprobe` doğrulandı, PATH/download fallback kullanılmadı.
-- `git diff --check` — PASS.
-- Rapor yapısı — PASS; 40 benzersiz `## BUG-###` bölümü, 40 schema `Status` alanı ve yalnızca izin verilen status kümesi kullanıldı.
+- Resolve `-nogui` 21.0.3.7 scratch clip/timeline smoke — PASS; bounded `-nogui` child with scratch project/clip/timeline creation; Resolve/fuscript residue 0 (owned child reaped; no GUI visual/drop verification claimed).
+- Media integration (bounded, no-GUI) — PASS: generic HLG / static PQ / attached-picture / audio-first / VFR — PASS; dynamic DV / HDR10+ — NOT_RUN (tool_unavailable); rotation — NOT_RUN; residue 0, temp outputs removed; no calibrated Rec.709 visual A/B claimed.
+- WorkflowIntegration provenance — PASS; exact pinned SHA / `codesign --verify --deep --strict` / Developer ID team `9ZGFBWLSYP` provenance passes for `WorkflowIntegration.node` (universal `x86_64+arm64`); `file`/`lipo -archs`/`otool -L` verified.
+- `npm run bundle:resolve` — EXPECTED FAIL (Darwin gate fail-closed); current bundle fails only due to arm64/Homebrew non-portable `tools/ffmpeg`/`tools/ffprobe` (thin `arm64`, ad-hoc `flags=0x2(adhoc)`, 83 absolute `/opt/homebrew` dylibs); `WorkflowIntegration.node` itself passes universal/codesign/team checks. Portable candidate is non-release and binary gate stays unchecked.
+- Gerçek HLG pipeline no-GUI (`Sample/1.MOV`, `hlg-local-b-v1`, gerçek b-executor, verifier exit 0/PASS, Rec.709 tags, source SHA, temp removed) — **MECHANICAL PASS**, görsel kabul değil.
+- Headless bridge (repo Electron 41.10.3 + Resolve-bundled Electron, resmi node, `Initialize true` / `SetAPITimeout`+`GetResolve`+`CleanUp` fail, residue 0) — **PARTIAL/NOT SUPPORTED**; GUI paneli daha önce açıldı; no GUI drop verification claimed.
+- `git diff --check` — PASS (whitespace hatası yok; bounded komutlar, temp/Resolve residue 0).
+- Rapor yapısı — PASS; 40 benzersiz `## BUG-###` bölümü, 40 schema `Status` alanı ve yalnızca izin verilen status kümesi kullanıldı; binary readiness claim yok.

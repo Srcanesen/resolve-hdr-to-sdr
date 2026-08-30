@@ -138,9 +138,9 @@ test('outputStore buildDisplayName routes by profileId', () => {
 
 test('inspection-adapter validateCliResponse accepts hlgSupported and both profiles', () => {
   const adapter = require('../inspection-adapter.cjs');
-  const goodLocal = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1' } };
+  const goodLocal = { outcome: 'complete', result: { displayName: 'a.mov', size: 123, sha256: 'a'.repeat(64), classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1', duration: 1 } };
   assert.equal(adapter.validateCliResponse(goodLocal), true);
-  const goodGeneric = { outcome: 'complete', result: { displayName: 'b.mov', size: 123, sha256: 'b'.repeat(64), classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1' } };
+  const goodGeneric = { outcome: 'complete', result: { displayName: 'b.mov', size: 123, sha256: 'b'.repeat(64), classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1', duration: 1 } };
   assert.equal(adapter.validateCliResponse(goodGeneric), true);
   const badProfile = { outcome: 'complete', result: { displayName: 'c.mov', size: 123, sha256: 'c'.repeat(64), classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'unknown' } };
   assert.equal(adapter.validateCliResponse(badProfile), false);
@@ -153,7 +153,7 @@ test('inspection-adapter validateCliResponse accepts hlgSupported and both profi
 test('ipc-contract isValidResponse accepts hlgSupported and validates profile pairing', () => {
   const { isValidResponse } = require('../ipc-contract.cjs');
   // hlgSupported with generic profile should be valid
-  const okGeneric = { outcome: 'complete', result: { classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1' } };
+  const okGeneric = { outcome: 'complete', result: { classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1', duration: 1 } };
   assert.equal(isValidResponse(okGeneric), true);
   // hlgSupported with local profile should be invalid (mismatched)
   const badGeneric = { outcome: 'complete', result: { classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-local-b-v1' } };
@@ -162,7 +162,7 @@ test('ipc-contract isValidResponse accepts hlgSupported and validates profile pa
   const badLocal = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-rec709-v1' } };
   assert.equal(isValidResponse(badLocal), false);
   // hlgKnownLocal with local profile valid
-  const okLocal = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1' } };
+  const okLocal = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1', duration: 1 } };
   assert.equal(isValidResponse(okLocal), true);
   // unknown profile fails
   const unknown = { outcome: 'complete', result: { classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'unknown' } };
@@ -202,6 +202,7 @@ test('ipc-contract attachIpc mints token for generic HLG and preserves privacy',
         reason: 'hlg_metadata_match',
         canConvert: true,
         profileId: PROFILE_ID_GENERIC,
+        duration: 1,
         displayName: 'generic.mov',
         size: 12345,
         sha256: 'b'.repeat(64),
@@ -571,9 +572,9 @@ test('renderer eligibility and copy for both HLG paths', () => {
   // Missing sourceId should fail
   assert.equal(helpers.isEligibleResult({ classification: 'hlgSupported', canConvert: true, sourceId: '' }), false);
   // buildSafeTechnicalFields should show HLG for both
-  const fieldsLocal = helpers.buildSafeTechnicalFields({ classification: 'hlgKnownLocal', size: 12345, duration: '12.3' });
+  const fieldsLocal = helpers.buildSafeTechnicalFields({ classification: 'hlgKnownLocal', size: 12345, duration: 12.3 });
   assert.ok(fieldsLocal.some(f => f.label === 'Format' && f.value === 'HLG'));
-  const fieldsGeneric = helpers.buildSafeTechnicalFields({ classification: 'hlgSupported', size: 12345, duration: '12.3' });
+  const fieldsGeneric = helpers.buildSafeTechnicalFields({ classification: 'hlgSupported', size: 12345, duration: 12.3 });
   assert.ok(fieldsGeneric.some(f => f.label === 'Format' && f.value === 'HLG'));
   // copy checks
   assert.equal(COPY.eligibleTitle, 'Ready to convert');
@@ -593,10 +594,10 @@ test('verifier script supports both profiles and unknown fails, argv safe', () =
   assert.ok(src.includes('hlg-local-b-v1') && src.includes('hlg-rec709-v1'));
   assert.ok(src.includes('case \"$EXPECTED_PROFILE\" in'));
   assert.ok(src.includes('unknown profile'));
-  // Must have generic HLG metadata check (bt2020nc, arib-std-b67, etc.)
-  assert.ok(src.includes('bt2020nc'));
-  assert.ok(src.includes('arib-std-b67'));
-  assert.ok(src.includes('has_dovi'));
+  // Generic and PQ source re-gates must use the shared normalized evidence helper.
+  assert.ok(src.includes('verify_contract.py" source'));
+  assert.ok(src.includes('-select_streams V:0'));
+  assert.equal(src.includes('-select_streams v:0'), false);
   // Must retain privacy scan and Rec709 tags checks
   assert.ok(src.includes('com[.]apple[.]quicktime'));
   assert.ok(src.includes('bt709'));

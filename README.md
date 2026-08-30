@@ -1,8 +1,10 @@
 # Resolve HDR to SDR
 
+[![CI](https://github.com/Srcanesen/resolve-hdr-to-sdr/actions/workflows/ci.yml/badge.svg)](https://github.com/Srcanesen/resolve-hdr-to-sdr/actions/workflows/ci.yml)
+
 Metadata-driven HDR to Rec.709 SDR converter. Source HDR files are inspected, classified from container and bitstream metadata, and when eligible converted to a separate Rec.709 SDR copy. DaVinci Resolve Workflow Integration is only the host panel and drop target — the source never has to enter Resolve.
 
-> Status: development shell with local verification. Visual correctness beyond mechanical checks has not been human-validated on a calibrated Rec.709 display.
+> Status: **source-alpha**. GitHub CI runs deterministic repository hygiene and offline quality checks. **Binary releases are disabled** until portable, redistributable macOS tools and a release validation pass exist. Visual correctness beyond mechanical checks has not been human-validated on a calibrated Rec.709 display.
 
 ## What it does
 
@@ -21,7 +23,7 @@ Classification is a pure function (`prototype/classifier.py` + `electron/b-profi
 |---|---|---|---|
 | `hlgKnownLocal` | true | `hlg-local-b-v1` | Both local samples exactly: SHA `46dad3…8593` (18,423,719) + SHA `2780c7…4a82a` (20,313,976) with full HLG evidence (`bt2020nc`/`arib-std-b67`/`bt2020`, `tv`, `yuv420p10le`, `hvc1`/`hevc`, `dv_profile 8 / compat 4 HLG`, no `mdcv`/`clli`) |
 | `hlgSupported` | true | `hlg-rec709-v1` | Generic non-Dolby HLG: `parse_ok`, not `unspecified`/`contradictory`, `bt2020nc` + `arib-std-b67` + `bt2020`, `tv`, `≥10-bit YUV` allowlist (`yuv420p10le`, `yuv422p10le`, `yuv444p10le`, `p12` variants), `has_dovi=false` |
-| `pqSupported` | true | `pq-rec709-v1` | Narrow static HDR10/PQ: `parse_ok`, not `unspecified`/`contradictory`, `bt2020nc`/`smpte2084`/`bt2020` + `tv`, same `≥10-bit` allowlist, `has_dovi=false`, `has_hdr10plus=false`, **both `MDCV` and `CLLI` present** (checked on stream `side_data_list` and a bounded initial probe interval via `-read_intervals %+#1`) |
+| `pqSupported` | true | `pq-rec709-v1` | Narrow static HDR10/PQ: `parse_ok`, not `unspecified`/`contradictory`, `bt2020nc`/`smpte2084`/`bt2020` + `tv`, same `≥10-bit` allowlist, `has_dovi=false`, `has_hdr10plus=false`, **both `MDCV` and `CLLI` present** (checked on stream `side_data_list` and a bounded initial probe interval via `-read_intervals 0%+1`) |
 | `pqHdr10Unsupported` | false | — | PQ detected but fails narrow gate (missing MDCV/CLLI, wrong pix_fmt, HDR10+ detected, etc.) |
 | `dolbyVisionUnsupported` | false | — | Dolby Vision detected and not the two allowlisted HLG samples (takes precedence over PQ) |
 | `uncertain` | false | — | Missing / contradictory / unknown / malformed metadata — fail-closed |
@@ -33,7 +35,7 @@ Dolby Vision expansion and HDR10+ dynamic (`st2094-40`) are not converted (fail-
 - macOS with DaVinci Resolve Studio (Workflow Integration host) for the Resolve panel; standalone Electron dev shell runs without Resolve
 - Python 3.10+ (3.14 tested), standard library only
 - `ffmpeg` / `ffprobe` with `libplacebo` (`ffmpeg-full` 9.x + `molten-vk` on macOS). Repo expects `tools/ffmpeg` and `tools/ffprobe` to resolve to the verified libplacebo build — see `tools/PROVENANCE.txt`. Runtime scripts use only these repo-local tool paths.
-- Node 20+ and `electron@41.10.3` (dev dependency). No other npm dependencies
+- Node **22.12+** and `electron@41.10.3` (dev dependency). No other npm dependencies
 
 ## Installation
 
@@ -84,19 +86,106 @@ npm run bundle:resolve
 node scripts/bundle-audit.cjs "$PWD/build/workflow-integration/com.hdrtosdr.app"
 ```
 
-The bundle is self-contained and never auto-installs. Manual copy to the Resolve plugins folder is required for host smoke. Inside Resolve it runs the lifecycle `Initialize('com.hdrtosdr.app')` → `SetAPITimeout(10)` → `RegisterCallback('ResolveQuit')` → `CleanUp` on quit, with `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`.
+The bundle build is portability-gated and never auto-installs. It is not claimed to be self-contained unless the Darwin audit verifies `WorkflowIntegration.node`, `tools/ffmpeg`, and `tools/ffprobe` as universal Intel+Apple Silicon Mach-O binaries with only system or relocatable dylib dependencies. The audit runs `file`, `lipo`, and `otool -L` without a shell; the current arm64-only Homebrew tools intentionally make `npm run bundle:resolve` fail closed until verified portable tools are provisioned. Manual copy to the Resolve plugins folder is required after a passing build. Inside Resolve a passing bundle runs the lifecycle `Initialize('com.hdrtosdr.app')` → `SetAPITimeout(10)` → `RegisterCallback('ResolveQuit')` → bounded runtime disposal (`SIGTERM` → grace → conditional `SIGKILL`) → `CleanUp` → resumed quit, with `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`.
 
 ### Scripts
 
 ```bash
 npm test            # python + electron tests
-npm run check       # alias for both suites
+npm run check       # offline suites only; never launches Resolve
+npm run guard:repo  # tracked names/history and text hygiene guard
+npm audit --audit-level=high
+
+# Optional local gates; none is part of check or normal CI:
+npm run doctor
+npm run test:media:integration
+npm run test:resolve:headless
 npm run bundle:resolve
+
+# Lifecycle cleanup is tested offline; normal checks never launch Resolve.
+# Managed children use detached POSIX groups with bounded TERM → KILL cleanup.
 
 scripts/verify-spike.sh <source> <output> <profileId>
 # checks source!=output, timing/frame/dimension preservation, documented audio policy,
 # Rec.709 tags, bounded HDR evidence, and semantic privacy tags
 ```
+
+The coordinator owns inspector, converter, verifier, capability-probe, and
+thumbnail children.
+
+The normal CI path intentionally does not run Resolve, the real-media
+integration harness, `doctor`, or the bundle build. Resolve is a proprietary
+local host with GUI/runtime state; real-media checks require user-supplied or
+locally provisioned tools and media; `doctor` requires those repo-local tools;
+and bundle generation is a portability/release operation. Keeping all four
+opt-in avoids claiming live or portable success from a clean source checkout.
+Binary releases remain disabled in this source-alpha stage. POSIX group cleanup is TERM, bounded grace, then KILL only
+if the owned group remains alive; Windows uses direct-child fallback without
+negative-PID signalling.
+
+### Real-media integration harness (explicit opt-in)
+
+```bash
+npm run test:media:integration
+```
+
+This command is the only real-transcode harness and is never invoked by
+`npm run check`. For local development it resolves `tools/ffmpeg` and
+`tools/ffprobe` with `realpath` and requires the canonical target to be a
+regular executable (`tool-doctor` already treats resolved targets as valid local
+tools); broken or non-regular targets, missing files, and non-executable
+targets fail closed. The harness reports `portable:false` and
+`resolved_external_tool:true` without exposing the real path, then runs the
+existing capability probes (`libx265`/`hevc_metadata`). It generates tiny
+generic HLG, static PQ/HDR10 (x265 MDCV + CLLI), attached-picture/audio-first,
+rotation, and VFR fixtures only inside a `0700` temporary directory, invokes
+every child with argument arrays and `shell:false`, bounds output/watchdogs,
+and removes the directory in `finally`.
+The structural scenario proves first-real-video selection, selected-frame
+evidence, `0:V:0`, presentation dimensions, and the audio policy. Rotation is
+reported as `not_run` with the exact readback reason if this FFmpeg/MP4 pair
+cannot preserve display metadata. Dolby Vision and HDR10+ are always explicit
+`not_run` (normally `tool_unavailable`); this task does not download tools or
+samples and never claims a dynamic-metadata PASS. Stdout is one sanitized JSON
+summary without paths or probe output.
+
+**Actual local result (2026-08-29): PASS via safe canonicalized local-dev tools.**
+The harness resolved the repo-local symlinks (`tools/ffmpeg` → Homebrew
+`ffmpeg-full 9.0.1` with `libplacebo`, `tools/ffprobe` similarly) with
+`realpath`, verified the canonical targets are regular executables and
+capability probes (`libx265`/`hevc_metadata`) passed, then executed the
+fixtures. The sanitized JSON summary reports `portable:false` and
+`resolved_external_tool:true` without exposing the real path. Required
+`genericHlg`, `staticPq`, `attachedPictureAudioFirst`, and `vfr` were `pass`;
+`rotation` was `not_run`/`rotation_metadata_not_preserved_by_ffmpeg_mp4`
+(FFmpeg/MP4 cannot preserve the rotate/display-matrix in this pair —
+acceptable edge), dynamic `dolbyVision`/`hdr10Plus` were
+`not_run`/`tool_unavailable`, and cleanup residue was `0`. Bundle/runtime
+portability gates remain fail-closed (`npm run bundle:resolve` still rejects
+symlink/dynamic thin tools); no media was written to `Sample/` or `Output/`.
+
+### Resolve `-nogui` smoke (explicit live check)
+
+```bash
+npm run test:resolve:headless
+```
+
+This opt-in command refuses any pre-existing `Resolve`/`fuscript` process, creates a
+one-frame temporary fixture with repo-local `tools/ffmpeg`, launches the exact
+`/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve -nogui`
+binary directly, and sets the official `RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB`,
+and `PYTHONPATH`. It proves the owned Resolve PID before mutation and quit, then
+uses only the official scripting API to create/delete a uniquely named scratch
+project, import only that fixture, create one timeline item, and read back bounded
+version, clip, property, and timeline evidence. Cleanup is bounded TERM→KILL,
+checks Resolve/fuscript residue, and removes the temporary media. It never uses
+`open -a`, and `npm run check` does not invoke it.
+
+Approved local run result: **PASS** — Resolve `21.0.3.7`; clip count `1`, name
+`hdrtosdr_resolve_smoke_fixture.mp4`, duration `00:00:01:00`, resolution `16x16`,
+codec `H.264 High L1.0`, fixture path match `true`; timeline count `1` and item
+count `1`; scratch project closed/deleted, fixture deleted, owned quit requested,
+PID proofs `true`, Resolve residue `0`, fuscript residue `0`.
 
 ## Outputs
 
@@ -132,7 +221,7 @@ Research spikes under `Output/spike/` historically used ProRes LT — not the El
 ## Security posture
 
 - No shell: all `ffprobe`/`ffmpeg` calls via `spawn([...], {shell:false})` with `tools/ffprobe` resolved as an absolute executable; no `PATH` fallback leakage
-- Inspector uses a bounded `-read_intervals %+#1 -show_frames` initial probe interval for side-data evidence; no raw frame leak
+- Inspector uses a bounded `-read_intervals 0%+1 -show_frames` initial probe interval for side-data evidence; no raw frame leak
 - Responses are privacy-filtered: only `displayName`, `size`, `sha256`, permitted color fields, `classification`/`reason`/`profileId`/`canConvert` — no raw paths, ffprobe stderr, GPS, or bytes
 - Electron: `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`, `webSecurity:true` via `secure-window.cjs`; renderer never receives filesystem paths
 - Drag and thumbnails are gated strictly on verified outputs: opaque `outputId`, revalidated owner `webContents.id`, canonical non-symlink containment (`outputStore.isSafeOutputFile`), `TOCTOU` `realpath` equality, current SHA-256/size fingerprint, and a 32×32 non-empty `NativeImage` for drag; thumbnail bytes are decode-validated, oversized output fails closed, and the bounded owner/fingerprint cache is invalidated on changes or owner cleanup
@@ -140,7 +229,7 @@ Research spikes under `Output/spike/` historically used ProRes LT — not the El
 
 ## Contributing
 
-Issues and pull requests welcome. Please run `npm run check` and `npm audit` locally, keep commits focused, and avoid staging ignored artifacts (`Output/`, `Sample/`, `build/`, `node_modules/`, symlinked tools). No project-specific commit style is enforced.
+Issues and pull requests welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), run `npm run guard:repo`, `npm run check`, and `npm audit` locally, keep commits focused, and avoid staging ignored artifacts (`Output/`, `Sample/`, `build/`, `node_modules/`, symlinked tools). No project-specific commit style is enforced.
 
 ## Security reporting
 

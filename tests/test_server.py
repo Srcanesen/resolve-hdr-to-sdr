@@ -16,6 +16,42 @@ from http.server import ThreadingHTTPServer
 
 from prototype.server import create_server, Handler, REPO_ROOT, MAX_UPLOAD_BYTES
 
+
+def make_fake_ffprobe():
+    root = Path(tempfile.mkdtemp(prefix="hdrtosdr-server-tools-"))
+    tools = root / "tools"
+    tools.mkdir()
+    executable = tools / "ffprobe"
+    probe_output = json.dumps({
+        "streams": [{
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "hevc",
+            "codec_tag_string": "hvc1",
+            "pix_fmt": "yuv420p10le",
+            "color_space": "bt2020nc",
+            "color_transfer": "arib-std-b67",
+            "color_primaries": "bt2020",
+            "color_range": "tv",
+            "level": 120,
+            "side_data_list": [{
+                "side_data_type": "DOVI configuration record",
+                "dv_profile": 8,
+                "dv_level": 4,
+                "rpu_present_flag": 1,
+                "dv_bl_signal_compatibility_id": 4,
+            }],
+        }],
+        "format": {"duration": "1"},
+    })
+    executable.write_text(
+        "#!/bin/sh\ncat <<'EOF'\n" + probe_output + "\nEOF\n",
+        encoding="utf-8",
+    )
+    os.chmod(executable, 0o755)
+    return root, executable
+
+
 def http_post_json(url, payload):
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "Content-Length": str(len(data))}, method="POST")
@@ -64,8 +100,10 @@ def http_post_raw(url, data, extra_headers=None):
 class TestServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Own the executable boundary; normal server tests never use ignored tools/ffprobe.
+        cls.ffprobe_root, cls.ffprobe = make_fake_ffprobe()
         # find free port
-        cls.server = create_server(0)
+        cls.server = create_server(0, ffprobe_executable=cls.ffprobe)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -84,6 +122,7 @@ class TestServer(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=2)
+        shutil.rmtree(cls.ffprobe_root, ignore_errors=True)
 
     def test_get_static(self):
         code, body, headers = http_get(self.base + "/")
@@ -104,6 +143,20 @@ class TestServer(unittest.TestCase):
         # csp on static
         _, _, h2 = http_get(self.base + "/style.css")
         self.assertIn("default-src 'self'", h2.get("Content-Security-Policy",""))
+
+    def test_default_startup_fails_without_repo_tool_even_when_path_has_ffprobe(self):
+        with tempfile.TemporaryDirectory(prefix="hdrtosdr-server-no-tools-") as directory:
+            root = Path(directory)
+            path_bin = root / "path-bin"
+            path_bin.mkdir()
+            path_ffprobe = path_bin / "ffprobe"
+            path_ffprobe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(path_ffprobe, 0o755)
+            with mock.patch.dict(os.environ, {"PATH": str(path_bin)}), mock.patch(
+                "prototype.server.REPO_ROOT", root
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    create_server(0)
 
     def test_bind_loopback_only(self):
         host, port = self.server.server_address

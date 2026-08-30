@@ -6,6 +6,8 @@ import time
 import signal
 import socket
 import select
+import shutil
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,16 @@ def _free_port():
 class TestMainShutdown(unittest.TestCase):
     def test_sigterm_clean_shutdown(self):
         port = _free_port()
-        cmd = [sys.executable, "-m", "prototype", "--port", str(port)]
+        tool_root = Path(tempfile.mkdtemp(prefix="hdrtosdr-main-tools-"))
+        tools = tool_root / "tools"
+        tools.mkdir()
+        ffprobe = tools / "ffprobe"
+        ffprobe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(ffprobe, 0o755)
+        cmd = [
+            sys.executable, "-m", "prototype", "--port", str(port),
+            "--ffprobe", str(ffprobe),
+        ]
         proc = subprocess.Popen(
             cmd,
             cwd=str(REPO_ROOT),
@@ -130,3 +141,4 @@ class TestMainShutdown(unittest.TestCase):
                     proc.stdout.close()
             except Exception:
                 pass
+            shutil.rmtree(tool_root, ignore_errors=True)

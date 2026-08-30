@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 from enum import Enum
+import math
 from typing import Optional, List, Dict, Any
 
 
@@ -73,7 +74,7 @@ class InspectionEvidence:
     chroma_location: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    duration: Optional[str] = None
+    duration: Optional[float] = None
     r_frame_rate: Optional[str] = None
     avg_frame_rate: Optional[str] = None
     # Codec level (ffprobe's integer level_idc, e.g. 120 for HEVC level 4.0)
@@ -162,7 +163,13 @@ class ClassificationResult:
             resp["color"] = color
         if dovi:
             resp["dovi"] = dovi
-        if ev and ev.duration:
+        try:
+            valid_duration = (ev and isinstance(ev.duration, (int, float))
+                              and not isinstance(ev.duration, bool)
+                              and math.isfinite(ev.duration) and ev.duration > 0)
+        except (TypeError, OverflowError):
+            valid_duration = False
+        if valid_duration:
             resp["duration"] = ev.duration
         resp["classification"] = self.classification.value
         resp["reason"] = self.reason

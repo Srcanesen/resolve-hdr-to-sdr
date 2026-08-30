@@ -1,5 +1,7 @@
 import unittest
 from unittest import mock
+import os
+import shutil
 import subprocess
 import json
 import hashlib
@@ -13,6 +15,22 @@ from prototype.contracts import Classification
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class TestInspector(unittest.TestCase):
+    def setUp(self):
+        self.ffprobe_root = Path(tempfile.mkdtemp(prefix="hdrtosdr-inspector-tools-"))
+        tools = self.ffprobe_root / "tools"
+        tools.mkdir()
+        self.ffprobe = tools / "ffprobe"
+        self.ffprobe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(self.ffprobe, 0o755)
+        self.ffprobe = self.ffprobe.resolve(strict=True)
+        self.ffprobe_patch = mock.patch(
+            "prototype.inspector.get_ffprobe_executable",
+            return_value=self.ffprobe,
+        )
+        self.ffprobe_patch.start()
+        self.addCleanup(self.ffprobe_patch.stop)
+        self.addCleanup(shutil.rmtree, self.ffprobe_root, ignore_errors=True)
+
     def test_parser_marks_known_bt2020_conflict_and_classifier_rejects_generic_hlg(self):
         payload = {
             "streams": [{
@@ -56,13 +74,34 @@ class TestInspector(unittest.TestCase):
                 self.assertEqual(classify(ev).classification, Classification.uncertain)
 
     def test_ffprobe_executable_is_absolute(self):
-        exe = get_ffprobe_executable(REPO_ROOT)
-        self.assertTrue(exe.is_absolute())
-        # must be tools/ffprobe resolved
-        self.assertTrue(str(exe).endswith("ffprobe"))
-        # ensure it's the repo-resolved absolute, not PATH fallback
-        expected = (REPO_ROOT / "tools" / "ffprobe").resolve(strict=True)
-        self.assertEqual(exe, expected)
+        with tempfile.TemporaryDirectory(prefix="hdrtosdr-ffprobe-root-") as directory:
+            repo_root = Path(directory)
+            tools = repo_root / "tools"
+            tools.mkdir()
+            executable = tools / "ffprobe"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(executable, 0o755)
+
+            exe = get_ffprobe_executable(repo_root)
+            self.assertTrue(exe.is_absolute())
+            self.assertTrue(str(exe).endswith("ffprobe"))
+            self.assertEqual(exe, executable.resolve(strict=True))
+
+    def test_missing_repo_ffprobe_does_not_use_path_fallback(self):
+        self.ffprobe_patch.stop()
+        with tempfile.TemporaryDirectory(prefix="hdrtosdr-missing-tools-") as directory:
+            root = Path(directory)
+            path_tool_dir = root / "path-bin"
+            path_tool_dir.mkdir()
+            path_tool = path_tool_dir / "ffprobe"
+            path_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(path_tool, 0o755)
+            media = root / "source.mov"
+            media.write_bytes(b"not media")
+            with mock.patch.dict(os.environ, {"PATH": str(path_tool_dir)}):
+                ev, err = inspect_user_selected_path(str(media), root)
+            self.assertIsNone(ev)
+            self.assertEqual(err, "ffprobe_missing")
 
     def test_inspector_uses_exact_executable(self):
         # Mock subprocess.run to capture argv
@@ -99,7 +138,7 @@ class TestInspector(unittest.TestCase):
         if not sample_path.exists():
             self.skipTest("Sample/1.MOV absent")
 
-        expected_exe = str(get_ffprobe_executable(REPO_ROOT))
+        expected_exe = str(self.ffprobe.resolve(strict=True))
 
         with mock.patch("prototype.inspector.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output, stderr=b"")
@@ -112,7 +151,7 @@ class TestInspector(unittest.TestCase):
             self.assertEqual(argv[0], expected_exe)
             self.assertIn("-show_streams", argv)
             self.assertIn("-select_streams", argv)
-            self.assertEqual(argv[argv.index("-select_streams") + 1], "v")
+            self.assertEqual(argv[argv.index("-select_streams") + 1], "V:0")
             self.assertIn("0%+1", argv)
             self.assertNotIn("%+#1", argv)
             self.assertIn(str(sample_path.resolve(strict=True)), argv)
@@ -223,11 +262,13 @@ class TestInspector(unittest.TestCase):
             "streams": [
                 {"index": 0, "codec_type": "audio"},
                 {"index": 1, "codec_type": "video", "disposition": {"attached_pic": 1}, "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 5}]},
-                {"index": 2, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1", "pix_fmt": "yuv420p10le", "color_space": "bt2020nc", "color_transfer": "arib-std-b67", "color_primaries": "bt2020", "color_range": "tv", "side_data_list": []},
+                {"index": 2, "codec_type": "video", "disposition": {"default": 0}, "codec_name": "hevc", "codec_tag_string": "hvc1", "pix_fmt": "yuv420p10le", "color_space": "bt2020nc", "color_transfer": "arib-std-b67", "color_primaries": "bt2020", "color_range": "tv", "side_data_list": []},
+                {"index": 3, "codec_type": "video", "disposition": {"default": 1}, "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 8}]},
             ],
             "frames": [
                 {"stream_index": 1, "media_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 5}]},
                 {"stream_index": 2, "media_type": "video", "side_data_list": [{"side_data_type": "Mastering display metadata"}]},
+                {"stream_index": 3, "media_type": "video", "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_profile": 8}]},
             ],
             "format": {},
         }
@@ -247,6 +288,21 @@ class TestInspector(unittest.TestCase):
         self.assertTrue(ev.parse_ok)
         self.assertTrue(ev.is_contradictory)
         self.assertEqual(classify(ev).classification, Classification.uncertain)
+        self.assertFalse(classify(ev).can_convert)
+
+    def test_generic_hlg_rejects_frame_only_hdr10plus_evidence(self):
+        payload = {
+            "streams": [{"index": 0, "codec_type": "video", "pix_fmt": "yuv420p10le",
+                         "color_space": "bt2020nc", "color_transfer": "arib-std-b67",
+                         "color_primaries": "bt2020", "color_range": "tv", "side_data_list": []}],
+            "frames": [{"stream_index": 0, "media_type": "video",
+                        "side_data_list": [{"side_data_type": "SMPTE ST 2094-40"}]}],
+            "format": {},
+        }
+        ev = _parse_ffprobe_json(json.dumps(payload).encode(), "hlg-plus.mov", 100, "c" * 64)
+        self.assertTrue(ev.parse_ok)
+        self.assertTrue(ev.has_hdr10plus)
+        self.assertNotEqual(classify(ev).classification, Classification.hlgSupported)
         self.assertFalse(classify(ev).can_convert)
 
     def test_dovi_flags_are_strict_and_zero_is_false(self):

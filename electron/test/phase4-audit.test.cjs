@@ -101,7 +101,7 @@ test('BUG-012 progress parses long chunks and reports real monotonic 0..99 perce
       stagingPath: path.join(tmp, '.stage.partial.mp4'),
       ffmpegPath: fake,
       profileId: PROFILE_ID_GENERIC,
-      durationSeconds: '10',
+      durationSeconds: 10,
       onProgress: (event) => progress.push(event),
     });
     assert.deepEqual(result, { outcome: 'success' });
@@ -130,7 +130,7 @@ test('BUG-012 conversion events use parsed duration rather than fixed midpoint p
       },
       inspectionAdapter: { inspect: async () => ({ outcome: 'complete', result: {
         classification: 'hlgSupported', canConvert: true, profileId: PROFILE_ID_GENERIC,
-        sha256: 'a'.repeat(64), size: 100, duration: '10', displayName: 'source.mov',
+        sha256: 'a'.repeat(64), size: 100, duration: 10, displayName: 'source.mov',
       } }) },
       bExecutor: {
         getFfmpegAbsolute: () => '/tmp/fake',
@@ -178,7 +178,11 @@ function makeThumbnailChild(bytes, delay = 0) {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.killed = false;
-  child.kill = () => { child.killed = true; };
+  child.kill = () => {
+    if (child.killed) return;
+    child.killed = true;
+    child.emit('close', null, 'SIGTERM');
+  };
   setTimeout(() => {
     if (child.killed) return;
     child.stdout.emit('data', bytes);
@@ -279,6 +283,34 @@ test('BUG-038 thumbnails dedupe, cache within bounds, clean owners, and invalida
   }
 });
 
+
+test('BUG-017 destroyed thumbnail owner terminates its decoder group and clears ownership', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-phase4-thumb-owner-'));
+  try {
+    const output = path.join(tmp, 'output.mp4');
+    const ffmpeg = path.join(tmp, 'ffmpeg');
+    fs.writeFileSync(output, 'verified-output');
+    fs.writeFileSync(ffmpeg, '#!/bin/sh\\n', { mode: 0o755 });
+    fs.chmodSync(ffmpeg, 0o755);
+    let child;
+    const service = new ConversionService({
+      bExecutor: { getFfmpegAbsolute: () => ffmpeg },
+      spawn: () => { child = makeThumbnailChild(Buffer.from('jpeg'), 500); return child; },
+      thumbnailDecoder: () => true,
+    });
+    const outputId = crypto.randomUUID();
+    service.outputs.set(outputId, makeOutputRecord(output, 55));
+    const pending = service.getThumbnailDataUrl({ outputId, senderWebContentsId: 55 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    service.cleanupOwner(55);
+    assert.equal(child.killed, true);
+    assert.deepEqual(await pending, { ok: false, reason: 'thumbnail_failed' });
+    assert.equal(service.thumbnailProcesses.size, 0);
+    await service.dispose();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test('BUG-038 thumbnail cache evicts oldest entries at configured bound', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-phase4-thumb-bound-'));

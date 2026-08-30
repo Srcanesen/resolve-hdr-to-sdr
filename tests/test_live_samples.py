@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 
@@ -7,7 +8,12 @@ from prototype.classifier import classify
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class TestLiveSamples(unittest.TestCase):
+    def _require_opt_in(self):
+        if os.environ.get("HDRTOSDR_RUN_LIVE_SAMPLES") != "1":
+            self.skipTest("live Sample media validation is opt-in; normal checks use owned fakes")
+
     def test_sample1_produces_hlgKnownLocal(self):
+        self._require_opt_in()
         sample = REPO_ROOT / "Sample" / "1.MOV"
         if not sample.exists():
             self.skipTest("Sample/1.MOV absent")
@@ -22,6 +28,7 @@ class TestLiveSamples(unittest.TestCase):
         self.assertEqual(ev.size, 18423719)
 
     def test_sample2_produces_hlgKnownLocal(self):
+        self._require_opt_in()
         sample = REPO_ROOT / "Sample" / "2.MOV"
         if not sample.exists():
             self.skipTest("Sample/2.MOV absent")
@@ -36,6 +43,7 @@ class TestLiveSamples(unittest.TestCase):
         self.assertEqual(ev.size, 20313976)
 
     def test_live_samples_no_conversion_called(self):
+        self._require_opt_in()
         # Ensure neither inspect nor classify triggers output creation
         output_dir = REPO_ROOT / "Output"
         before = set()
@@ -58,6 +66,7 @@ class TestLiveSamples(unittest.TestCase):
         self.assertEqual(before, after, "no Output should be created")
 
     def test_upload_live_samples_produce_hlgKnownLocal(self):
+        self._require_opt_in()
         # Test via temp file upload path (same as server upload)
         import tempfile, os
         for name in ["1.MOV", "2.MOV"]:

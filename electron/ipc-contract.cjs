@@ -97,6 +97,7 @@ function attachIpc(window, adapter, conversionService) {
       abortSignal: operationReservation.abortController && operationReservation.abortController.signal,
       timeoutMs: policy.inspectionTimeoutMs,
       stallTimeoutMs: policy.inspectionStallTimeoutMs,
+      terminationGraceMs: policy.terminationGraceMs,
       touchActivity: () => {},
       trackProcess: (child) => serviceRef.trackProcess(child, operationReservation),
       untrackProcess: (child) => serviceRef.untrackProcess(child, operationReservation),

@@ -60,7 +60,8 @@ test('buildFfmpegArgs uses frozen graph and required flags', () => {
   assert.ok(args.includes('-1'));
   assert.ok(args.includes('-map_chapters'));
   // primary video+optional audio only
-  assert.ok(args.includes('0:v:0'));
+  assert.ok(args.includes('0:V:0'));
+  assert.equal(args.includes('0:v:0'), false);
   assert.ok(args.includes('0:a?'));
   // ensure no subtitle/data mapping
   assert.equal(args.includes('0:s'), false);

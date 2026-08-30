@@ -21,6 +21,8 @@ let cleanupDone = false;
 let workflowIntegration = null;
 let beforeQuitApp = null;
 let beforeQuitHandler = null;
+let beforeQuitInFlight = null;
+const RUNTIME_DISPOSE_TIMEOUT_MS = 5_000;
 
 function logStartupFailure(stage = 'startup') {
   const safeStages = new Set(['host_lifecycle', 'app_ready', 'window_create', 'startup']);
@@ -29,7 +31,23 @@ function logStartupFailure(stage = 'startup') {
 }
 
 function disposeRuntime() {
-  try { if (conversionService && typeof conversionService.dispose === 'function') conversionService.dispose(); } catch {}
+  try {
+    if (conversionService && typeof conversionService.dispose === 'function') {
+      return Promise.resolve(conversionService.dispose()).catch(() => {});
+    }
+  } catch {}
+  return Promise.resolve();
+}
+
+async function disposeRuntimeBounded() {
+  let timer;
+  await Promise.race([
+    disposeRuntime(),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, RUNTIME_DISPOSE_TIMEOUT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
 }
 
 function cleanupHost(wi) {
@@ -39,8 +57,11 @@ function cleanupHost(wi) {
 }
 
 function removeBeforeQuitHandler() {
-  if (beforeQuitApp && beforeQuitHandler && typeof beforeQuitApp.removeListener === 'function') {
-    try { beforeQuitApp.removeListener('before-quit', beforeQuitHandler); } catch {}
+  if (beforeQuitApp && beforeQuitHandler) {
+    try {
+      if (typeof beforeQuitApp.removeListener === 'function') beforeQuitApp.removeListener('before-quit', beforeQuitHandler);
+      else if (typeof beforeQuitApp.off === 'function') beforeQuitApp.off('before-quit', beforeQuitHandler);
+    } catch {}
   }
   beforeQuitApp = null;
   beforeQuitHandler = null;
@@ -48,9 +69,25 @@ function removeBeforeQuitHandler() {
 
 function installBeforeQuitHandler(appObj, wi, isHost) {
   removeBeforeQuitHandler();
-  const handler = () => {
-    disposeRuntime();
-    if (isHost) cleanupHost(wi);
+  beforeQuitInFlight = null;
+  const handler = (event) => {
+    if (beforeQuitInFlight) return;
+    try {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    } catch {}
+    beforeQuitInFlight = (async () => {
+      await disposeRuntimeBounded();
+      if (isHost) cleanupHost(wi);
+      // Remove only this handler before resuming quit. Host/application
+      // listeners owned elsewhere remain installed and can observe the final
+      // quit attempt without causing this handler to recurse.
+      removeBeforeQuitHandler();
+      try { appObj.quit(); } catch {}
+    })().catch(() => {
+      removeBeforeQuitHandler();
+      try { appObj.quit(); } catch {}
+    });
+    return beforeQuitInFlight;
   };
   try {
     appObj.on('before-quit', handler);
@@ -227,7 +264,7 @@ async function startApp(options = {}) {
     createWindowInternal();
   } catch {
     removeBeforeQuitHandler();
-    disposeRuntime();
+    await disposeRuntimeBounded();
     if (isHost) cleanupHost(wi);
     logStartupFailure('app_ready');
     failClosedGeneric(appObj);
@@ -251,7 +288,8 @@ async function startApp(options = {}) {
 
 function _resetForTest() {
   removeBeforeQuitHandler();
-  disposeRuntime();
+  beforeQuitInFlight = null;
+  void disposeRuntimeBounded();
   started = false;
   cleanupDone = false;
   workflowIntegration = null;

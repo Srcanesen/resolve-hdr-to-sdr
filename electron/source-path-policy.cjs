@@ -14,24 +14,21 @@ function isAllowedSystemAlias(component, resolved, pathModule = path) {
   return expected !== undefined && pathModule.resolve(resolved) === pathModule.resolve(expected);
 }
 
-function normalizeCanonicalPath(value, pathModule = path) {
+function normalizeCanonicalPath(value, pathModule = path, platform = process.platform) {
   let normalized = pathModule.resolve(value);
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
     for (const [alias, target] of ALLOWED_SYSTEM_SYMLINKS) {
       if (normalized === alias) normalized = target;
       else if (normalized.startsWith(`${alias}${pathModule.sep}`)) {
         normalized = `${target}${normalized.slice(alias.length)}`;
       }
     }
-    // APFS is normally case-insensitive; realpath supplies the authoritative
-    // spelling, while this also handles a legacy token made before realpath.
-    normalized = normalized.toLowerCase();
   }
   return normalized;
 }
 
-function canonicalPathsEqual(first, second, pathModule = path) {
-  return normalizeCanonicalPath(first, pathModule) === normalizeCanonicalPath(second, pathModule);
+function canonicalPathsEqual(first, second, pathModule = path, platform = process.platform) {
+  return normalizeCanonicalPath(first, pathModule, platform) === normalizeCanonicalPath(second, pathModule, platform);
 }
 
 function canonicalizeSafeSourcePath(inputPath, fsModule = fs, pathModule = path) {
@@ -100,6 +97,7 @@ function canonicalizeSafeSourcePath(inputPath, fsModule = fs, pathModule = path)
 
 module.exports = {
   ALLOWED_SYSTEM_SYMLINKS,
+  normalizeCanonicalPath,
   canonicalPathsEqual,
   canonicalizeSafeSourcePath,
 };

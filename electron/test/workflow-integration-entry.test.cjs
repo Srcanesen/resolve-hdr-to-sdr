@@ -8,8 +8,13 @@ const BUILD_ROOT = path.resolve(__dirname, '../../build/workflow-integration/com
 const BUILT_MAIN = path.join(BUILD_ROOT, 'main.js');
 const BUILT_ELECTRON_MAIN = path.join(BUILD_ROOT, 'electron', 'main.cjs');
 const BUILT_NODE = path.join(BUILD_ROOT, 'WorkflowIntegration.node');
+// Bundle assertions are opt-in: a clean source checkout intentionally has no
+// generated bundle, and normal CI must not build one just to run unit tests.
+const BUNDLE_TEST_SKIP = !fs.existsSync(BUILT_MAIN) || !fs.existsSync(BUILT_ELECTRON_MAIN)
+  ? 'bundle absent; run npm run bundle:resolve before the opt-in bundle tests'
+  : false;
 
-test('workflow integration built main.js static invariant: no require.main gate, root official node injection, exactly-once start call', () => {
+test('workflow integration built main.js static invariant: no require.main gate, root official node injection, exactly-once start call', { skip: BUNDLE_TEST_SKIP }, () => {
   assert.ok(fs.existsSync(BUILT_MAIN), `built main.js missing: ${BUILT_MAIN} — run npm run bundle:resolve first`);
   const content = fs.readFileSync(BUILT_MAIN, 'utf8');
 
@@ -58,7 +63,7 @@ test('workflow integration built main.js static invariant: no require.main gate,
   assert.ok(content.includes('module.exports'), 'must keep module export');
 });
 
-test('workflow integration built main.js loads as Resolve module (not require.main) and invokes startApp exactly once with root WorkflowIntegration.node injected; startup errors swallowed at outer', async () => {
+test('workflow integration built main.js loads as Resolve module (not require.main) and invokes startApp exactly once with root WorkflowIntegration.node injected; startup errors swallowed at outer', { skip: BUNDLE_TEST_SKIP }, async () => {
   assert.ok(fs.existsSync(BUILT_MAIN), `built main.js missing: ${BUILT_MAIN}`);
   // Ensure electron and node files exist for require resolution
   assert.ok(fs.existsSync(BUILT_ELECTRON_MAIN), `built electron/main.cjs missing: ${BUILT_ELECTRON_MAIN}`);

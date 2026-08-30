@@ -112,8 +112,8 @@ compare_pair() {
 
   # Verify tags superficially
   local ref_probe out_probe
-  ref_probe="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,duration,nb_frames,color_space,color_transfer,color_primaries,pix_fmt -of json "$ref_real")"
-  out_probe="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,duration,nb_frames,color_space,color_transfer,color_primaries,pix_fmt -of json "$out_real")"
+  ref_probe="$("$FFPROBE" -v error -select_streams V:0 -show_entries stream=width,height,avg_frame_rate,duration,nb_frames,color_space,color_transfer,color_primaries,pix_fmt -of json "$ref_real")"
+  out_probe="$("$FFPROBE" -v error -select_streams V:0 -show_entries stream=width,height,avg_frame_rate,duration,nb_frames,color_space,color_transfer,color_primaries,pix_fmt -of json "$out_real")"
   echo "ref probe: $(printf '%s' "$ref_probe" | python3 -c "import json,sys; s=(json.load(sys.stdin).get('streams') or [{}])[0]; print(f\"{s.get('width')}x{s.get('height')} {s.get('color_space')}/{s.get('color_transfer')}/{s.get('color_primaries')} {s.get('pix_fmt')} {s.get('duration')}s {s.get('nb_frames')}f\")")" >&2
   echo "out probe: $(printf '%s' "$out_probe" | python3 -c "import json,sys; s=(json.load(sys.stdin).get('streams') or [{}])[0]; print(f\"{s.get('width')}x{s.get('height')} {s.get('color_space')}/{s.get('color_transfer')}/{s.get('color_primaries')} {s.get('pix_fmt')} {s.get('duration')}s {s.get('nb_frames')}f\")")" >&2
 

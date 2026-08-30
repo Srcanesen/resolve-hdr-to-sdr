@@ -46,9 +46,8 @@ function formatFileSize(bytes) {
 }
 
 function formatDuration(duration) {
-  if (duration == null) return '';
-  const v = typeof duration === 'string' ? parseFloat(duration) : Number(duration);
-  if (!Number.isFinite(v) || v < 0) return '';
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) return '';
+  const v = duration;
   const totalSec = Math.round(v);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;

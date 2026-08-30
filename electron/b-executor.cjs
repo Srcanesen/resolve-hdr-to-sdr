@@ -2,7 +2,11 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { StringDecoder } = require('string_decoder');
-const { DEFAULT_HEAVY_OPERATION_POLICY } = require('./heavy-operation-policy.cjs');
+const {
+  DEFAULT_HEAVY_OPERATION_POLICY,
+  HeavyOperationCoordinator,
+  markProcessGroupOwned,
+} = require('./heavy-operation-policy.cjs');
 const {
   FILTER_GRAPH,
   PROFILE_ID,
@@ -60,28 +64,61 @@ function unavailableCapability() {
   return { ok: false, reason: 'profile_unavailable' };
 }
 
-function probeCapabilityHelp(ffmpegPath, args) {
+function probeCapabilityHelp(ffmpegPath, args, options = {}) {
+  const {
+    trackProcess,
+    untrackProcess,
+    killProcess,
+    terminationGraceMs,
+    abortSignal,
+  } = options || {};
   return new Promise((resolve) => {
     let child;
     let output = '';
     let settled = false;
     let timer = null;
+    let cleanup = () => {};
+    const onAbort = () => fail();
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      try { if (abortSignal) abortSignal.removeEventListener('abort', onAbort); } catch {}
+      cleanup();
       resolve(result);
     };
+    let fallbackCoordinator = null;
     const fail = () => {
-      try { if (child) child.kill('SIGKILL'); } catch {}
+      try {
+        if (child && killProcess) killProcess(child);
+        else if (child && fallbackCoordinator) fallbackCoordinator.kill(child);
+      } catch {}
       finish(null);
     };
     try {
-      child = spawn(ffmpegPath, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(ffmpegPath, args, {
+        detached: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      markProcessGroupOwned(child);
+      if (!killProcess) {
+        fallbackCoordinator = new HeavyOperationCoordinator({ terminationGraceMs });
+        fallbackCoordinator.track(child);
+      }
+      try {
+        if (trackProcess) trackProcess(child);
+      } catch {}
     } catch {
       finish(null);
       return;
     }
+    cleanup = () => {
+      try {
+        if (untrackProcess) untrackProcess(child);
+        else if (fallbackCoordinator) fallbackCoordinator.untrack(child);
+      } catch {}
+    };
     const collect = (chunk) => {
       if (settled) return;
       output += chunk.toString('utf8');
@@ -92,10 +129,12 @@ function probeCapabilityHelp(ffmpegPath, args) {
     child.on('error', () => finish(null));
     child.on('close', (status) => finish({ status, output }));
     timer = setTimeout(fail, CAPABILITY_PROBE_TIMEOUT_MS);
+    if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+    if (abortSignal && abortSignal.aborted) onAbort();
   });
 }
 
-async function probeCapability(ffmpegPath, profileId) {
+async function probeCapability(ffmpegPath, profileId, options = {}) {
   try {
     const st = await fs.promises.stat(ffmpegPath);
     if (!st.isFile()) return unavailableCapability();
@@ -105,7 +144,7 @@ async function probeCapability(ffmpegPath, profileId) {
   }
 
   const help = async (probeArgs, requiredTokens) => {
-    const result = await probeCapabilityHelp(ffmpegPath, probeArgs);
+    const result = await probeCapabilityHelp(ffmpegPath, probeArgs, options);
     if (!result || (result.status !== 0 && !result.output)) return null;
     for (const token of requiredTokens) {
       if (!hasExactToken(result.output, token)) return null;
@@ -152,7 +191,7 @@ async function probeCapability(ffmpegPath, profileId) {
 // The cache stores the in-flight promise as well as completed results. The
 // executable identity is part of the key so a replacement binary cannot reuse
 // a stale capability result.
-async function checkCapability(ffmpegPath, profileId = PROFILE_ID_LOCAL_B) {
+async function checkCapability(ffmpegPath, profileId = PROFILE_ID_LOCAL_B, options = {}) {
   if (!isKnownProfileId(profileId) || typeof ffmpegPath !== 'string' || !path.isAbsolute(ffmpegPath)) {
     return unavailableCapability();
   }
@@ -168,7 +207,14 @@ async function checkCapability(ffmpegPath, profileId = PROFILE_ID_LOCAL_B) {
   const key = `${ffmpegPath}\\0${profileId}\\0${identity}`;
   const cached = capabilityCache.get(key);
   if (cached) return cached;
-  const pending = probeCapability(ffmpegPath, profileId).catch(() => unavailableCapability());
+  let pending = probeCapability(ffmpegPath, profileId, options).catch(() => unavailableCapability());
+  pending = pending.then((result) => {
+    // A cancelled owner must not poison the shared executable capability cache.
+    if (options && options.abortSignal && options.abortSignal.aborted && capabilityCache.get(key) === pending) {
+      capabilityCache.delete(key);
+    }
+    return result;
+  });
   capabilityCache.set(key, pending);
   return pending;
 }
@@ -192,7 +238,7 @@ function buildFfmpegArgs(sourcePath, stagingPath, profileId) {
     '-i', sourcePath,
     '-map_metadata', '-1',
     '-map_chapters', '-1',
-    '-map', '0:v:0',
+    '-map', '0:V:0',
     '-map', '0:a?',
     '-vf', vf,
     '-c:v', 'libx264',
@@ -313,6 +359,7 @@ async function runBConversion(opts) {
     killProcess,
     durationSeconds,
     progressThrottleMs = DEFAULT_PROGRESS_THROTTLE_MS,
+    terminationGraceMs,
   } = opts;
   const effectiveProfile = profileId === undefined ? PROFILE_ID_LOCAL_B : profileId;
   if (!isKnownProfileId(effectiveProfile)) {
@@ -322,7 +369,13 @@ async function runBConversion(opts) {
     return Promise.resolve({ outcome: 'cancelled', reason: 'cancelled' });
   }
   const ffmpegPath = overrideFfmpeg || getFfmpegAbsolute();
-  const cap = await checkCapability(ffmpegPath, effectiveProfile);
+  const cap = await checkCapability(ffmpegPath, effectiveProfile, {
+    trackProcess,
+    untrackProcess,
+    killProcess,
+    terminationGraceMs,
+    abortSignal,
+  });
   if (!cap || !cap.ok) return { outcome: 'error', reason: 'profile_unavailable' };
   if (abortSignal && abortSignal.aborted) return { outcome: 'cancelled', reason: 'cancelled' };
 
@@ -335,8 +388,18 @@ async function runBConversion(opts) {
       return;
     }
     let child;
+    let fallbackCoordinator = null;
     try {
-      child = spawn(ffmpegPath, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(ffmpegPath, args, {
+        detached: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      markProcessGroupOwned(child);
+      if (!killProcess) {
+        fallbackCoordinator = new HeavyOperationCoordinator({ terminationGraceMs });
+        fallbackCoordinator.track(child);
+      }
     } catch {
       resolve({ outcome: 'error', reason: 'conversion_failed' });
       return;
@@ -359,7 +422,10 @@ async function runBConversion(opts) {
       clearTimeout(stallTimer);
       if (progressReporter) progressReporter.clear();
       if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
-      try { if (untrackProcess) untrackProcess(child); } catch {}
+      try {
+        if (untrackProcess) untrackProcess(child);
+        else if (fallbackCoordinator) fallbackCoordinator.untrack(child);
+      } catch {}
     };
     const finish = (result) => {
       if (finished) return;
@@ -370,7 +436,7 @@ async function runBConversion(opts) {
     const killChild = () => {
       try {
         if (killProcess) killProcess(child);
-        else child.kill('SIGKILL');
+        else if (fallbackCoordinator) fallbackCoordinator.kill(child);
       } catch {}
     };
     const onAbort = () => {
@@ -393,6 +459,7 @@ async function runBConversion(opts) {
     try { if (trackProcess) trackProcess(child); } catch {}
     if (abortSignal) {
       abortSignal.addEventListener('abort', onAbort, { once: true });
+      if (abortSignal.aborted) onAbort();
     }
     if (timeoutMs > 0) {
       timeoutTimer = setTimeout(() => {

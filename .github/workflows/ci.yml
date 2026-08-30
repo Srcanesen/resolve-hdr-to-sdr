@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# The workflow only reads source and history; it does not need write access.
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality (Node 22 / Python 3.14)
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          # package.json requires >=22.12.0; stay on the current major.
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Guard repository hygiene
+        run: npm run guard:repo
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      # check is deliberately offline: it runs Python and Electron unit tests,
+      # never Resolve, real-media integration, doctor, or bundle generation.
+      - name: Run offline checks
+        run: npm run check
+
+      - name: Check whitespace errors
+        run: git diff --check
+
+  python-compatibility:
+    name: Python tests (3.10)
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # Compatibility coverage is intentionally Python-only; no npm, Resolve,
+      # media integration, doctor, or bundle command belongs in this job.
+      - name: Run Python tests
+        run: python3 -m unittest discover -s tests -v

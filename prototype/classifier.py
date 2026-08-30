@@ -9,6 +9,7 @@ from .contracts import (
     PROFILE_ID_PQ,
     ALLOWED_GENERIC_HLG_PIX_FMTS,
 )
+from .evidence import is_generic_hlg_evidence, is_pq_evidence
 
 
 def _is_pq_transfer(ev: InspectionEvidence) -> bool:
@@ -69,71 +70,15 @@ def _expected_hlg_match(ev: InspectionEvidence) -> bool:
 
 
 def _is_generic_hlg_supported(ev: InspectionEvidence) -> bool:
-    # Positively confirmed non-Dolby HLG only: parse_ok already ensured caller checks,
-    # not unspecified/contradictory, exact color triplet bt2020nc + arib-std-b67 + bt2020,
-    # color_range=tv, known >=10-bit YUV pixel format via explicit allowlist, has_dovi=false.
-    if not ev.parse_ok:
-        return False
-    if ev.is_unspecified or ev.is_contradictory:
-        return False
-    if ev.has_dovi:
-        return False
-    if ev.color_space != "bt2020nc":
-        return False
-    if ev.color_transfer != "arib-std-b67":
-        return False
-    if ev.color_primaries != "bt2020":
-        return False
-    if ev.color_range != "tv":
-        return False
-    if ev.pix_fmt is None:
-        return False
-    # explicit small rule – exact match in allowlist, lowercased
-    pix = str(ev.pix_fmt).strip().lower()
-    if pix not in ALLOWED_GENERIC_HLG_PIX_FMTS:
-        return False
-    # Do not require SHA/basename/codec/container – only metadata above
-    return True
+    # The evidence helper is shared with the verifier, including selected-frame
+    # DOVI/HDR10+ rejection and canonical color aliases.
+    return is_generic_hlg_evidence(ev)
 
 
 def _is_pq_supported(ev: InspectionEvidence) -> bool:
-    # Positively confirmed static HDR10 only: parse_ok, not unspecified/contradictory,
-    # exact bt2020nc/smpte2084/bt2020 + tv, >=10-bit YUV allowlist, has_dovi=false, has_hdr10plus=false, BOTH MDCV and CLLI present.
-    if not ev.parse_ok:
-        return False
-    if ev.is_unspecified or ev.is_contradictory:
-        return False
-    if ev.has_dovi or ev.has_hdr10plus:
-        return False
-    if not _is_pq_transfer(ev):
-        return False
-    # Exact triplet with numeric alias tolerance for ffprobe enum strings
-    try:
-        cs_norm = str(ev.color_space).strip().lower() if ev.color_space is not None else None
-    except Exception:
-        cs_norm = None
-    if cs_norm not in ("bt2020nc", "9"):
-        return False
-    try:
-        cp_norm = str(ev.color_primaries).strip().lower() if ev.color_primaries is not None else None
-    except Exception:
-        cp_norm = None
-    if cp_norm not in ("bt2020", "9"):
-        return False
-    try:
-        cr_norm = str(ev.color_range).strip().lower() if ev.color_range is not None else None
-    except Exception:
-        cr_norm = None
-    if cr_norm != "tv":
-        return False
-    if ev.pix_fmt is None:
-        return False
-    pix = str(ev.pix_fmt).strip().lower()
-    if pix not in ALLOWED_GENERIC_HLG_PIX_FMTS:
-        return False
-    if not ev.has_mdcv or not ev.has_clli:
-        return False
-    return True
+    # The evidence helper is shared with the verifier, including selected-frame
+    # DOVI/HDR10+ rejection and both static HDR10 metadata requirements.
+    return is_pq_evidence(ev)
 
 
 def classify(ev: InspectionEvidence) -> ClassificationResult:

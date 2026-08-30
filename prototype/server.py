@@ -6,12 +6,18 @@ import tempfile
 import mimetypes
 import shutil
 from pathlib import Path
+from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from .contracts import Classification, ClassificationResult, InspectionEvidence
 from .classifier import classify
-from .inspector import inspect_local_path, inspect_temp_file, get_ffprobe_executable
+from .inspector import (
+    inspect_local_path,
+    inspect_temp_file,
+    get_ffprobe_executable,
+    _resolve_ffprobe_executable,
+)
 
 # Separate upload-protocol cap (not user-source path limit). Browser upload is the only
 # remaining 32 MiB enforcement; Electron local-path inspection has no size cap.
@@ -164,7 +170,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json_error(400, "invalid_request")
             return
 
-        ev, err = inspect_local_path(path_val, REPO_ROOT)
+        ev, err = inspect_local_path(
+            path_val,
+            REPO_ROOT,
+            ffprobe_executable=getattr(self.server, "ffprobe_executable", None),
+        )
 
         if err is not None and ev is None:
             # validation / probe failure -> fail closed uncertain, no path leak
@@ -309,8 +319,11 @@ class Handler(BaseHTTPRequestHandler):
 
             # Inspect temp file
             ev, err = inspect_temp_file(
-                tmpfile, display_hint, REPO_ROOT,
+                tmpfile,
+                display_hint,
+                REPO_ROOT,
                 precomputed_sha256=hasher.hexdigest(),
+                ffprobe_executable=getattr(self.server, "ffprobe_executable", None),
             )
 
             if ev is None and err is not None:
@@ -383,15 +396,22 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def create_server(port: int = 8765) -> ThreadingHTTPServer:
-    # Validate ffprobe exists at startup
-    ffprobe = get_ffprobe_executable(REPO_ROOT)
-    # Ensure absolute
+def create_server(
+    port: int = 8765,
+    ffprobe_executable: Optional[Path] = None,
+) -> ThreadingHTTPServer:
+    # The default is deliberately strict and repo-local. The explicit absolute
+    # seam exists for tests that own a temporary executable.
+    if ffprobe_executable is None:
+        ffprobe = get_ffprobe_executable(REPO_ROOT)
+    else:
+        ffprobe = _resolve_ffprobe_executable(REPO_ROOT, ffprobe_executable)
     if not ffprobe.is_absolute():
         raise RuntimeError("ffprobe must be absolute")
 
     server_address = ("127.0.0.1", port)
     httpd = ThreadingHTTPServer(server_address, Handler)
+    httpd.ffprobe_executable = ffprobe
     httpd.daemon_threads = True
     httpd.allow_reuse_address = True
     return httpd

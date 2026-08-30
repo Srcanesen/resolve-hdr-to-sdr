@@ -1,7 +1,11 @@
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { DEFAULT_HEAVY_OPERATION_POLICY } = require('./heavy-operation-policy.cjs');
+const {
+  DEFAULT_HEAVY_OPERATION_POLICY,
+  HeavyOperationCoordinator,
+  markProcessGroupOwned,
+} = require('./heavy-operation-policy.cjs');
 
 const MAX_REQUEST_BYTES = 8192;
 const TIMEOUT_MS = DEFAULT_HEAVY_OPERATION_POLICY.inspectionTimeoutMs;
@@ -98,6 +102,10 @@ function isSafeReason(value) {
   return isSafeText(value, 200) && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
+function isValidDuration(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
 function validateInspectionResult(r, { allowSourceId = false } = {}) {
   if (!isPlainObject(r)) return false;
   const allowedResult = new Set([
@@ -116,7 +124,7 @@ function validateInspectionResult(r, { allowSourceId = false } = {}) {
   }
   if ('size' in r && (!Number.isSafeInteger(r.size) || r.size < 0)) return false;
   if ('sha256' in r && (typeof r.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.sha256))) return false;
-  if ('duration' in r && !isSafeText(r.duration, 128)) return false;
+  if ('duration' in r && !isValidDuration(r.duration)) return false;
 
   if ('color' in r) {
     if (!isPlainObject(r.color)) return false;
@@ -146,7 +154,7 @@ function validateInspectionResult(r, { allowSourceId = false } = {}) {
   }
   const expectedProfile = EXPECTED_PROFILE_BY_CLASSIFICATION[r.classification];
   if (expectedProfile) {
-    if (r.canConvert !== true || r.profileId !== expectedProfile) return false;
+    if (r.canConvert !== true || r.profileId !== expectedProfile || !isValidDuration(r.duration)) return false;
   } else if (r.canConvert !== false || 'profileId' in r) {
     return false;
   }
@@ -183,6 +191,7 @@ function inspect(userPath, options = {}) {
     untrackProcess,
     touchActivity,
     killProcess,
+    terminationGraceMs,
   } = options || {};
   const effectiveTimeoutMs = boundedTimeout(timeoutMs, TIMEOUT_MS);
   const effectiveStallTimeoutMs = boundedTimeout(stallTimeoutMs, STALL_TIMEOUT_MS);
@@ -219,8 +228,18 @@ function inspect(userPath, options = {}) {
     }
 
     let child;
+    let fallbackCoordinator = null;
     try {
-      child = spawn(py, [cliPath], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(py, [cliPath], {
+        detached: true,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      markProcessGroupOwned(child);
+      if (!killProcess) {
+        fallbackCoordinator = new HeavyOperationCoordinator({ terminationGraceMs });
+        fallbackCoordinator.track(child);
+      }
     } catch {
       resolve({ outcome: 'error', reason: 'inspection_failed' });
       return;
@@ -230,7 +249,10 @@ function inspect(userPath, options = {}) {
       clearTimeout(timeoutTimer);
       clearTimeout(stallTimer);
       if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
-      try { if (untrackProcess) untrackProcess(child); } catch {}
+      try {
+        if (untrackProcess) untrackProcess(child);
+        else if (fallbackCoordinator) fallbackCoordinator.untrack(child);
+      } catch {}
     };
     const finish = (result) => {
       if (settled) return;
@@ -241,7 +263,7 @@ function inspect(userPath, options = {}) {
     const killChild = () => {
       try {
         if (killProcess) killProcess(child);
-        else child.kill('SIGKILL');
+        else if (fallbackCoordinator) fallbackCoordinator.kill(child);
       } catch {}
     };
     const onAbort = () => {
@@ -264,7 +286,10 @@ function inspect(userPath, options = {}) {
     };
 
     try { if (trackProcess) trackProcess(child); } catch {}
-    if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+    if (abortSignal) {
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+      if (abortSignal.aborted) onAbort();
+    }
     if (effectiveTimeoutMs > 0) {
       timeoutTimer = setTimeout(() => {
         timedOut = true;
@@ -332,6 +357,7 @@ module.exports = {
   resolveBackendRoot,
   validateCliResponse,
   validateInspectionResult,
+  isValidDuration,
   isSafeReason,
   inspect,
   MAX_REQUEST_BYTES,

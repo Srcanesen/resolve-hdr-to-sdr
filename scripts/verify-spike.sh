@@ -98,216 +98,30 @@ if [ "$EXPECTED_PROFILE" = "hlg-local-b-v1" ]; then
   fi
   echo "OK: source SHA $SRC_BN $SRC_SHA for profile $EXPECTED_PROFILE" >&2
 elif [ "$EXPECTED_PROFILE" = "hlg-rec709-v1" ]; then
-  # Generic HLG: verify exact HLG input metadata before accepting output, no SHA allowlist
-  # Requirements: parse_ok, not unspecified/contradictory, exact triplet bt2020nc + arib-std-b67 + bt2020, color_range=tv,
-  # known >=10-bit YUV pix_fmt via explicit allowlist, has_dovi=false.
-  SRC_META_JSON="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name,codec_tag_string,pix_fmt,color_space,color_transfer,color_primaries,color_range -show_entries stream=side_data_list -of json "$SRC_REAL" 2>/dev/null)" || {
-    echo "FAIL: ffprobe failed for source $SRC_INPUT (profile $EXPECTED_PROFILE)" >&2
+  # Re-gate with the same normalized stream + selected-frame evidence as inspection.
+  SRC_META_JSON="$("$FFPROBE" -v error -select_streams V:0 -read_intervals "0%+1" -show_streams -show_frames -of json "$SRC_REAL" 2>/dev/null)" || {
+    echo "FAIL: ffprobe failed for source (profile $EXPECTED_PROFILE)" >&2
     exit 1
   }
   if [ -z "$SRC_META_JSON" ]; then
-    echo "FAIL: empty ffprobe output for source $SRC_INPUT" >&2
+    echo "FAIL: empty ffprobe output for source (profile $EXPECTED_PROFILE)" >&2
     exit 1
   fi
-  python3 - "$SRC_META_JSON" <<'PY'
-import json, sys
-data = json.loads(sys.argv[1])
-streams = data.get("streams", [])
-v = next((s for s in streams if s.get("codec_type") == "video"), streams[0] if streams else {})
-# Extract fields
-cs = v.get("color_space")
-ct = v.get("color_transfer")
-cp = v.get("color_primaries")
-cr = v.get("color_range")
-pix = v.get("pix_fmt")
-# Side data dovi detection
-has_dovi = False
-side = v.get("side_data_list") or []
-for sd in side:
-    t = (sd.get("side_data_type") or "").lower()
-    if "dovi" in t or "dolby" in t:
-        has_dovi = True
-        break
-# unspecified/contradictory via color values
-is_unspecified = False
-for val in (cs, ct, cp):
-    if val is None:
-        continue
-    vl = str(val).lower()
-    if vl in ("unknown", "unspecified", "2"):
-        is_unspecified = True
-# Also check if any color field missing is considered fail-closed (unknown)
-if cs is None or ct is None or cp is None or cr is None or pix is None:
-    print(f"FAIL: missing required HLG metadata for generic profile: cs={cs} ct={ct} cp={cp} cr={cr} pix={pix}", file=sys.stderr)
-    sys.exit(1)
-if is_unspecified:
-    print(f"FAIL: unspecified metadata for generic profile: cs={cs} ct={ct} cp={cp}", file=sys.stderr)
-    sys.exit(1)
-# Contradictory not directly detectable here, but if ffprobe reports contradictory?
-# For now treat is_contradictory as false unless explicit, but generic verifier should fail if contradictory flag would be true.
-# We'll fail if colors are contradictory via mismatch? Already handled by exact triplet.
-allowed_pix = {"yuv420p10le","yuv422p10le","yuv444p10le","yuv420p12le","yuv422p12le","yuv444p12le"}
-pix_norm = str(pix).strip().lower()
-if pix_norm not in allowed_pix:
-    print(f"FAIL: pix_fmt {pix} not in allowed >=10-bit list for generic profile", file=sys.stderr)
-    sys.exit(1)
-if cs != "bt2020nc":
-    print(f"FAIL: color_space {cs} != bt2020nc for generic profile", file=sys.stderr)
-    sys.exit(1)
-if ct != "arib-std-b67":
-    print(f"FAIL: color_transfer {ct} != arib-std-b67 for generic profile", file=sys.stderr)
-    sys.exit(1)
-if cp != "bt2020":
-    print(f"FAIL: color_primaries {cp} != bt2020 for generic profile", file=sys.stderr)
-    sys.exit(1)
-if cr != "tv":
-    print(f"FAIL: color_range {cr} != tv for generic profile", file=sys.stderr)
-    sys.exit(1)
-if has_dovi:
-    print(f"FAIL: has_dovi true but generic profile requires non-Dolby HLG", file=sys.stderr)
-    sys.exit(1)
-# PQ should be rejected (already ct check ensures not PQ, but double-check)
-if ct and ("2084" in ct.lower() or ct.lower() == "smpte2084"):
-    print(f"FAIL: PQ transfer detected for generic profile", file=sys.stderr)
-    sys.exit(1)
-print(f"OK: generic HLG source verified cs={cs} ct={ct} cp={cp} cr={cr} pix={pix} has_dovi={has_dovi}", file=sys.stderr)
-PY
-  if [ $? -ne 0 ]; then
+  if ! printf '%s' "$SRC_META_JSON" | python3 "$PROJECT_ROOT/electron/verify_contract.py" source "$EXPECTED_PROFILE"; then
     exit 1
   fi
   echo "OK: source HLG metadata verified for profile $EXPECTED_PROFILE" >&2
 elif [ "$EXPECTED_PROFILE" = "pq-rec709-v1" ]; then
-  # PQ narrow gate: strict re-gate using stream + bounded initial side-data evidence; require both MDCV/CLLI and reject DOVI/HDR10+
-  # Requirements: parse_ok, not unspecified/contradictory, exact bt2020nc + smpte2084 + bt2020, tv, >=10-bit allowlist, has_dovi=false, has_hdr10plus=false, BOTH MDCV and CLLI present.
-  SRC_META_JSON="$("$FFPROBE" -v error -select_streams v:0 -read_intervals "%+#1" -show_streams -show_frames -of json "$SRC_REAL" 2>/dev/null)" || {
-    echo "FAIL: ffprobe failed for source $SRC_INPUT (profile $EXPECTED_PROFILE)" >&2
+  # Re-gate with the same normalized stream + selected-frame evidence as inspection.
+  SRC_META_JSON="$("$FFPROBE" -v error -select_streams V:0 -read_intervals "0%+1" -show_streams -show_frames -of json "$SRC_REAL" 2>/dev/null)" || {
+    echo "FAIL: ffprobe failed for source (profile $EXPECTED_PROFILE)" >&2
     exit 1
   }
   if [ -z "$SRC_META_JSON" ]; then
-    echo "FAIL: empty ffprobe output for source $SRC_INPUT" >&2
+    echo "FAIL: empty ffprobe output for source (profile $EXPECTED_PROFILE)" >&2
     exit 1
   fi
-  python3 - "$SRC_META_JSON" <<'PY'
-import json, sys
-data = json.loads(sys.argv[1])
-streams = data.get("streams", [])
-v = next((s for s in streams if s.get("codec_type") == "video"), streams[0] if streams else {})
-cs = v.get("color_space")
-ct = v.get("color_transfer")
-cp = v.get("color_primaries")
-cr = v.get("color_range")
-pix = v.get("pix_fmt")
-# Detect DOVI/HDR10+ and MDCV/CLLI from stream side_data_list AND bounded initial frame side_data
-def collect_flags(data):
-    has_dovi = False
-    has_hdr10plus = False
-    has_mdcv = False
-    has_clli = False
-    # stream
-    side = v.get("side_data_list") or []
-    for sd in side:
-        t = (sd.get("side_data_type") or "").lower()
-        if "dovi" in t or "dolby" in t:
-            has_dovi = True
-        if "hdr10plus" in t or "hdr10_plus" in t or "hdr10+" in t or "st2094-40" in t or "st2094-10" in t or "st2094" in t:
-            has_hdr10plus = True
-        if "mastering display" in t or "mdcv" in t:
-            has_mdcv = True
-        if "content light" in t or "clli" in t:
-            has_clli = True
-        if t == "mdcv" or "mdcv" in t:
-            has_mdcv = True
-        if t == "clli" or "clli" in t:
-            has_clli = True
-    # frames from the bounded initial probe interval (%+#1 packet/frame bound)
-    frames = data.get("frames", []) or []
-    for fr in frames:
-        f_side = fr.get("side_data_list")
-        if f_side is None:
-            f_side = fr.get("side_data", []) or []
-        if not isinstance(f_side, list):
-            continue
-        for sd in f_side:
-            if not isinstance(sd, dict):
-                continue
-            t = str(sd.get("side_data_type", "")).lower()
-            if "dovi" in t or "dolby" in t:
-                has_dovi = True
-            if "hdr10plus" in t or "hdr10_plus" in t or "hdr10+" in t or "st2094-40" in t or "st2094-10" in t or "st2094" in t:
-                has_hdr10plus = True
-            if "mastering display" in t or "mdcv" in t:
-                has_mdcv = True
-            if "content light" in t or "clli" in t:
-                has_clli = True
-            if t == "mdcv" or "mdcv" in t:
-                has_mdcv = True
-            if t == "clli" or "clli" in t:
-                has_clli = True
-    return has_dovi, has_hdr10plus, has_mdcv, has_clli
-has_dovi, has_hdr10plus, has_mdcv, has_clli = collect_flags(data)
-# unspecified check
-is_unspecified = False
-for val in (cs, ct, cp):
-    if val is None:
-        continue
-    vl = str(val).lower()
-    if vl in ("unknown", "unspecified", "2", ""):
-        is_unspecified = True
-# contradictory: PQ transfer but primaries/space not bt2020
-is_contradictory = False
-if ct is not None:
-    ctn = str(ct).lower()
-    if "2084" in ctn or ctn in ("smpte2084", "smpte2084(pq)", "pq", "16"):
-        if cs is not None and str(cs).lower() not in ("bt2020nc", "9", "bt2020"):
-            # Check if cs is known value and not bt2020nc -> contradictory
-            if str(cs).lower() not in ("", "unknown", "unspecified", "2"):
-                if str(cs).lower() != "bt2020nc":
-                    is_contradictory = True
-        if cp is not None and str(cp).lower() not in ("bt2020", "9"):
-            if str(cp).lower() not in ("", "unknown", "unspecified", "2"):
-                if str(cp).lower() != "bt2020":
-                    is_contradictory = True
-if cs is None or ct is None or cp is None or cr is None or pix is None:
-    print(f"FAIL: missing required PQ metadata for pq profile: cs={cs} ct={ct} cp={cp} cr={cr} pix={pix}", file=sys.stderr)
-    sys.exit(1)
-if is_unspecified:
-    print(f"FAIL: unspecified metadata for pq profile: cs={cs} ct={ct} cp={cp}", file=sys.stderr)
-    sys.exit(1)
-if is_contradictory:
-    print(f"FAIL: contradictory metadata for pq profile: cs={cs} ct={ct} cp={cp}", file=sys.stderr)
-    sys.exit(1)
-allowed_pix = {"yuv420p10le","yuv422p10le","yuv444p10le","yuv420p12le","yuv422p12le","yuv444p12le"}
-pix_norm = str(pix).strip().lower()
-if pix_norm not in allowed_pix:
-    print(f"FAIL: pix_fmt {pix} not in allowed >=10-bit list for pq profile", file=sys.stderr)
-    sys.exit(1)
-# exact triplet
-if str(cs).lower() not in ("bt2020nc", "9"):
-    print(f"FAIL: color_space {cs} != bt2020nc for pq profile", file=sys.stderr)
-    sys.exit(1)
-# ct must be smpte2084 or 16
-ct_norm = str(ct).strip().lower()
-if ct_norm not in ("smpte2084", "smpte2084(pq)", "pq", "16") and "2084" not in ct_norm:
-    print(f"FAIL: color_transfer {ct} != smpte2084 for pq profile", file=sys.stderr)
-    sys.exit(1)
-if str(cp).lower() not in ("bt2020", "9"):
-    print(f"FAIL: color_primaries {cp} != bt2020 for pq profile", file=sys.stderr)
-    sys.exit(1)
-if str(cr).lower() != "tv":
-    print(f"FAIL: color_range {cr} != tv for pq profile", file=sys.stderr)
-    sys.exit(1)
-if has_dovi:
-    print(f"FAIL: has_dovi true but pq profile requires static HDR10 without Dolby", file=sys.stderr)
-    sys.exit(1)
-if has_hdr10plus:
-    print(f"FAIL: has_hdr10plus true but pq profile requires static HDR10 without HDR10+", file=sys.stderr)
-    sys.exit(1)
-if not has_mdcv or not has_clli:
-    print(f"FAIL: pq profile requires both MDCV and CLLI; got has_mdcv={has_mdcv} has_clli={has_clli}", file=sys.stderr)
-    sys.exit(1)
-print(f"OK: pq static HDR10 source verified cs={cs} ct={ct} cp={cp} cr={cr} pix={pix} has_mdcv={has_mdcv} has_clli={has_clli} has_dovi={has_dovi} has_hdr10plus={has_hdr10plus}", file=sys.stderr)
-PY
-  if [ $? -ne 0 ]; then
+  if ! printf '%s' "$SRC_META_JSON" | python3 "$PROJECT_ROOT/electron/verify_contract.py" source "$EXPECTED_PROFILE"; then
     exit 1
   fi
   echo "OK: source PQ metadata verified for profile $EXPECTED_PROFILE" >&2
@@ -345,7 +159,7 @@ if ! printf '%s\0%s' "$SRC_CONTRACT_JSON" "$DST_CONTRACT_JSON" | \
 fi
 
 # Output ffprobe tags must be Rec.709 SDR.
-PROBE="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,color_range,width,height -of json "$DST_REAL")"
+PROBE="$("$FFPROBE" -v error -select_streams V:0 -show_entries stream=codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,color_range,width,height -of json "$DST_REAL")"
 read -r CS CT CP CR PF CN PR <<< "$(printf '%s\n' "$PROBE" | python3 -c 'import json,sys; s=(json.load(sys.stdin).get("streams") or [{}])[0]; print(*[(s.get(k) or "") for k in ("color_space","color_transfer","color_primaries","color_range","pix_fmt","codec_name","profile")])')"
 
 FAIL=0
@@ -363,8 +177,8 @@ echo "OK: output Rec.709 SDR tags $CS/$CT/$CP $CR $PF $CN $PR for profile $EXPEC
 # is rejected only within this bounded evidence window. This is an evidence check, not
 # an unbounded claim that later packets contain no HDR metadata.
 HDR_SCAN_FRAMES=32
-DST_FRAME_SIDE_DATA="$("$FFPROBE" -v error -select_streams v:0 -read_intervals "%+#${HDR_SCAN_FRAMES}" \
-  -show_streams -show_frames -show_entries 'stream=side_data_list:frame=side_data_list' -of json "$DST_REAL" 2>/dev/null)" || {
+DST_FRAME_SIDE_DATA="$("$FFPROBE" -v error -select_streams V:0 -read_intervals "%+#${HDR_SCAN_FRAMES}" \
+  -show_streams -show_frames -show_entries 'stream=codec_type,index,side_data_list:frame=stream_index,side_data_list' -of json "$DST_REAL" 2>/dev/null)" || {
   echo "FAIL: ffprobe failed while inspecting bounded output HDR side data" >&2
   exit 1
 }

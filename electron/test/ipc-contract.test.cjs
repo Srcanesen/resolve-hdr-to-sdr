@@ -34,8 +34,24 @@ test('isValidRequest rejects non-string path', () => {
 });
 
 test('isValidResponse accepts complete', () => {
-  const resp = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1' } };
+  const resp = { outcome: 'complete', result: { classification: 'hlgKnownLocal', reason: 'allowlist_hlg_match', canConvert: true, profileId: 'hlg-local-b-v1', duration: 1 } };
   assert.equal(isValidResponse(resp), true);
+});
+
+test('BUG-021 IPC duration is a finite positive JSON number and is required for conversion', () => {
+  const base = { classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true, profileId: 'hlg-rec709-v1' };
+  assert.equal(isValidResponse({ outcome: 'complete', result: { ...base, duration: 1.25 } }), true);
+  for (const duration of [undefined, '1.25', 0, -1, NaN, Infinity, -Infinity, null]) {
+    const result = { ...base };
+    if (duration !== undefined) result.duration = duration;
+    assert.equal(isValidResponse({ outcome: 'complete', result }), false, `duration=${String(duration)}`);
+  }
+  assert.equal(isValidResponse({ outcome: 'complete', result: {
+    classification: 'uncertain', reason: 'unknown', canConvert: false, duration: 1,
+  } }), true);
+  assert.equal(isValidResponse({ outcome: 'complete', result: {
+    classification: 'uncertain', reason: 'unknown', canConvert: false, duration: '1',
+  } }), false);
 });
 
 test('isValidResponse accepts error', () => {
@@ -87,10 +103,22 @@ test('validatePythonExecutablePath requires absolute executable', () => {
 });
 
 test('validateBackendRoot checks existence', () => {
-  const repoRoot = adapter.getRepoRoot();
-  assert.equal(adapter.validateBackendRoot(repoRoot).ok, true);
-  assert.equal(adapter.validateBackendRoot('/tmp').ok, false);
-  assert.equal(adapter.validateBackendRoot('relative/path').ok, false);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-backend-existence-'));
+  try {
+    const protodir = path.join(tmp, 'prototype');
+    const toolsdir = path.join(tmp, 'tools');
+    fs.mkdirSync(protodir, { recursive: true });
+    fs.mkdirSync(toolsdir, { recursive: true });
+    fs.writeFileSync(path.join(protodir, 'inspect_cli.py'), '# cli');
+    const ff = path.join(toolsdir, 'ffprobe');
+    fs.writeFileSync(ff, '#!/bin/sh\\nexit 0\\n', { mode: 0o755 });
+    fs.chmodSync(ff, 0o755);
+    assert.equal(adapter.validateBackendRoot(tmp).ok, true);
+    assert.equal(adapter.validateBackendRoot('/tmp').ok, false);
+    assert.equal(adapter.validateBackendRoot('relative/path').ok, false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('validateBackendRoot requires executable ffprobe', () => {
@@ -126,7 +154,7 @@ test('inspection response schema rejects malformed nested fields and non-canonic
   const good = { outcome: 'complete', result: {
     displayName: 'clip.mov', size: 1, sha256: 'a'.repeat(64),
     classification: 'hlgSupported', reason: 'hlg_metadata_match', canConvert: true,
-    profileId: 'hlg-rec709-v1', sourceId: '550e8400-e29b-41d4-a716-446655440000',
+    profileId: 'hlg-rec709-v1', sourceId: '550e8400-e29b-41d4-a716-446655440000', duration: 1,
     color: { colorTransfer: 'arib-std-b67' },
     dovi: { hasDovi: false, hasMdcv: false, hasClli: false },
   } };
@@ -164,10 +192,19 @@ test('shared source policy canonicalizes safe files and rejects all non-system s
 test('inspection adapter enforces an injected finite timeout', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hdrtosdr-timeout-'));
   const python = path.join(tmp, 'slow-python');
+  const protodir = path.join(tmp, 'prototype');
+  const toolsdir = path.join(tmp, 'tools');
+  fs.mkdirSync(protodir);
+  fs.mkdirSync(toolsdir);
+  fs.writeFileSync(path.join(protodir, 'inspect_cli.py'), '# cli');
+  fs.writeFileSync(path.join(toolsdir, 'ffprobe'), '#!/bin/sh\nsleep 2\n');
   fs.writeFileSync(python, '#!/bin/sh\nsleep 2\n');
+  fs.chmodSync(path.join(toolsdir, 'ffprobe'), 0o755);
   fs.chmodSync(python, 0o755);
   const previousPython = process.env.HDRTOSDR_PYTHON;
+  const previousBackend = process.env.HDRTOSDR_BACKEND_ROOT;
   process.env.HDRTOSDR_PYTHON = python;
+  process.env.HDRTOSDR_BACKEND_ROOT = tmp;
   const started = Date.now();
   try {
     const result = await adapter.inspect('/tmp/source.mov', { timeoutMs: 40, stallTimeoutMs: 1000 });
@@ -176,6 +213,8 @@ test('inspection adapter enforces an injected finite timeout', async () => {
   } finally {
     if (previousPython === undefined) delete process.env.HDRTOSDR_PYTHON;
     else process.env.HDRTOSDR_PYTHON = previousPython;
+    if (previousBackend === undefined) delete process.env.HDRTOSDR_BACKEND_ROOT;
+    else process.env.HDRTOSDR_BACKEND_ROOT = previousBackend;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -184,7 +223,6 @@ test('getRepoRoot resolves to existing directory containing prototype', () => {
   const r = adapter.getRepoRoot();
   assert.equal(path.isAbsolute(r), true);
   assert.equal(fs.existsSync(path.join(r, 'prototype', 'inspect_cli.py')), true);
-  assert.equal(fs.existsSync(path.join(r, 'tools', 'ffprobe')), true);
 });
 
 // Pure helper tests for secure-window without launching Electron

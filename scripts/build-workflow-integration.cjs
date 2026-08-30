@@ -3,6 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { BUNDLE_FILE_ALLOWLIST, sha256File, auditBundle } = require('./bundle-audit.cjs');
+const {
+  WORKFLOW_INTEGRATION_PROVENANCE,
+  verifyWorkflowIntegrationNode,
+} = require('./workflow-integration-provenance.cjs');
 
 const PLUGIN_ID = 'com.hdrtosdr.app';
 const PLUGIN_NAME = 'HdrToSdr';
@@ -12,7 +16,7 @@ const PLUGIN_FILEPATH = 'main.js';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const BUILD_ROOT = path.join(REPO_ROOT, 'build', 'workflow-integration', PLUGIN_ID);
-const OFFICIAL_SDK_NODE = '/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node';
+const OFFICIAL_SDK_NODE = WORKFLOW_INTEGRATION_PROVENANCE.sdkPath;
 
 function fail(msg) {
   console.error(`BUILD FAILED: ${msg}`);
@@ -76,6 +80,14 @@ function copyAllowlistedFiles(sourceRoot, destinationRoot, relativeFiles) {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(source, destination);
     try { fs.chmodSync(destination, relative.endsWith('verify-spike.sh') ? 0o755 : (stat.mode & 0o777)); } catch {}
+  }
+}
+
+function resolveRequiredTool(src, label) {
+  try {
+    return fs.realpathSync(src);
+  } catch {
+    fail(`${label}_missing`);
   }
 }
 
@@ -189,16 +201,18 @@ function checkNoAbsolutePaths(root, repoRoot) {
 
 function main() {
   console.log('Building HdrToSdr Workflow Integration bundle...');
-  console.log(`Repo root: ${REPO_ROOT}`);
-  console.log(`Build root: ${BUILD_ROOT}`);
-  console.log(`Official SDK node: ${OFFICIAL_SDK_NODE}`);
+  console.log('Repo root configured.');
+  console.log('Build root configured.');
+  console.log('Official SDK node input configured.');
 
   ensureFileExists(OFFICIAL_SDK_NODE, { executable: false, notSymlink: true, label: 'Official WorkflowIntegration.node' });
+  const sourceProvenance = verifyWorkflowIntegrationNode(OFFICIAL_SDK_NODE);
+  if (!sourceProvenance.ok) fail(`Official WorkflowIntegration.node provenance failed: ${sourceProvenance.reason}`);
   let sdkStat;
   try { sdkStat = fs.statSync(OFFICIAL_SDK_NODE); } catch (e) { fail(`Official node stat failed: ${e.message}`); }
   if (sdkStat.size === 0) fail('Official node is empty');
-  const officialHash = sha256File(OFFICIAL_SDK_NODE);
-  ok(`Official SDK node found (${sdkStat.size} bytes, sha256 ${officialHash.slice(0,12)}...)`);
+  const officialHash = sourceProvenance.sha256;
+  ok(`Official SDK node found and provenance verified (${sdkStat.size} bytes, sha256 ${officialHash.slice(0,12)}...)`);
 
   ensureDirExists(path.join(REPO_ROOT, 'electron'), 'electron directory');
   ensureFileExists(path.join(REPO_ROOT, 'electron', 'main.cjs'), { label: 'electron/main.cjs' });
@@ -228,13 +242,12 @@ function main() {
 
   const ffmpegLink = path.join(REPO_ROOT, 'tools', 'ffmpeg');
   const ffprobeLink = path.join(REPO_ROOT, 'tools', 'ffprobe');
-  let ffmpegReal, ffprobeReal;
-  try { ffmpegReal = fs.realpathSync(ffmpegLink); } catch (e) { fail(`tools/ffmpeg resolve failed: ${e.message}`); }
-  try { ffprobeReal = fs.realpathSync(ffprobeLink); } catch (e) { fail(`tools/ffprobe resolve failed: ${e.message}`); }
+  const ffmpegReal = resolveRequiredTool(ffmpegLink, 'ffmpeg');
+  const ffprobeReal = resolveRequiredTool(ffprobeLink, 'ffprobe');
   ensureFileExists(ffmpegReal, { executable: true, notSymlink: true, label: 'tools/ffmpeg real target' });
   ensureFileExists(ffprobeReal, { executable: true, notSymlink: true, label: 'tools/ffprobe real target' });
-  ok(`tools/ffmpeg real target: ${ffmpegReal}`);
-  ok(`tools/ffprobe real target: ${ffprobeReal}`);
+  ok('tools/ffmpeg real target resolved and executable');
+  ok('tools/ffprobe real target resolved and executable');
 
   const secureWinSrc = fs.readFileSync(path.join(REPO_ROOT, 'electron', 'secure-window.cjs'), 'utf8');
   const sandboxChecks = [
@@ -336,8 +349,8 @@ function main() {
   ok('Verified bundle has no symlinks');
 
   const bundleAudit = auditBundle(BUILD_ROOT);
-  if (!bundleAudit.ok) fail(`Bundle allowlist audit failed: ${bundleAudit.reason}`);
-  ok(`Bundle allowlist audit passed (${bundleAudit.files.length} regular files)`);
+  if (!bundleAudit.ok) fail(`Bundle allowlist/portability audit failed: ${bundleAudit.reason}`);
+  ok(`Bundle allowlist/portability audit passed (${bundleAudit.files.length} regular files)`);
 
   const ffmpegDest = path.join(BUILD_ROOT, 'tools', 'ffmpeg');
   const ffprobeDest = path.join(BUILD_ROOT, 'tools', 'ffprobe');

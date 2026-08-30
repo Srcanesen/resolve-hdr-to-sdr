@@ -57,7 +57,7 @@ fi
 [ -f "$SRC_REAL" ] || { echo "error: source not found: $SRC" >&2; exit 1; }
 
 # Validate known input class – fail-visible on unknown/mismatch
-PROBE_JSON="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=color_space,color_transfer,color_primaries,color_range,pix_fmt,codec_name -of json "$SRC_REAL")"
+PROBE_JSON="$("$FFPROBE" -v error -select_streams V:0 -show_entries stream=color_space,color_transfer,color_primaries,color_range,pix_fmt,codec_name -of json "$SRC_REAL")"
 CS="$(echo "$PROBE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["streams"][0] if d.get("streams") else {}; print(s.get("color_space",""))')"
 CT="$(echo "$PROBE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["streams"][0] if d.get("streams") else {}; print(s.get("color_transfer",""))')"
 CP="$(echo "$PROBE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["streams"][0] if d.get("streams") else {}; print(s.get("color_primaries",""))')"
@@ -150,7 +150,7 @@ echo "spike: $SRC_REAL -> $DST_REAL" >&2
 # Explicit 10-bit Rec.709 SDR ProRes 422 LT tags; never overwrites input file
 "$FFMPEG" -hide_banner -loglevel info -i "$SRC_REAL" \
   -map_metadata -1 \
-  -map 0:v:0 -map 0:a? \
+  -map 0:V:0 -map 0:a? \
   -vf "$VF" \
   -c:v prores_ks -profile:v 1 -pix_fmt yuv422p10le -vendor ap10 \
   -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv \

@@ -332,6 +332,7 @@ test('phase 1: dispose kills tracked process and aborts active job', async () =>
   try {
     const killed = [];
     const { service } = makeService(root, {
+      operationPolicy: { terminationGraceMs: 10 },
       bExecutor: {
         getFfmpegAbsolute: () => '/tmp/fake-ffmpeg',
         runBConversion: async ({ abortSignal }) => new Promise((resolve) => {
@@ -339,15 +340,18 @@ test('phase 1: dispose kills tracked process and aborts active job', async () =>
         }),
       },
     });
-    const fakeProcess = { kill: (signal) => killed.push(signal) };
-    service.trackProcess(fakeProcess);
+    const fakeProcess = { kill: (signal) => {
+      killed.push(signal);
+      if (signal === 'SIGTERM') fakeProcess.exitCode = 0;
+    } };
     const win = makeWindow(6);
     eventsByWindow.set(win.id, []);
     const token = seed(service, win.id);
     const response = await service.startJob({ sourceId: token, profileId: PROFILE_ID, senderWebContents: win });
     assert.equal(response.ok, true);
-    service.dispose();
-    assert.deepEqual(killed, ['SIGKILL']);
+    service.trackProcess(fakeProcess);
+    await service.dispose();
+    assert.deepEqual(killed, ['SIGTERM']);
     assert.equal(service.hasActiveOperation(), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

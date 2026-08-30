@@ -26,6 +26,7 @@ const {
   DEFAULT_HEAVY_OPERATION_POLICY,
   HeavyOperationCoordinator,
   normalizePolicy,
+  markProcessGroupOwned,
 } = require('./heavy-operation-policy.cjs');
 
 const CONVERT_START_CHANNEL = 'hdrtosdr:convert:start';
@@ -238,6 +239,8 @@ class ConversionService {
     this.thumbnailCache = new Map(); // outputId -> validated {dataUrl, owner, fingerprint}
     this.thumbnailCacheBytes = 0;
     this.thumbnailInFlight = new Map(); // outputId + owner + fingerprint -> shared promise
+    this.thumbnailProcesses = new Map(); // ownerWebContentsId -> Set<ChildProcess>
+    this.thumbnailOwnerGenerations = new Map();
     this.thumbnailCacheMaxEntries = Number.isSafeInteger(opts.thumbnailCacheMaxEntries) && opts.thumbnailCacheMaxEntries > 0
       ? Math.min(opts.thumbnailCacheMaxEntries, MAX_THUMB_CACHE_ENTRIES)
       : MAX_THUMB_CACHE_ENTRIES;
@@ -248,6 +251,7 @@ class ConversionService {
     this.operationCoordinator = opts.operationCoordinator || new HeavyOperationCoordinator(this.operationPolicy);
     this.activeProcesses = this.operationCoordinator.processes;
     this.disposed = false;
+    this.disposePromise = null;
     this.dependencies = {
       fs: opts.fs || fs,
       path: opts.path || path,
@@ -322,9 +326,28 @@ class ConversionService {
     return removed;
   }
 
+  _pruneThumbnailOwnerGeneration(ownerWebContentsId) {
+    if (this.thumbnailProcesses.has(ownerWebContentsId)) return;
+    for (const flight of this.thumbnailInFlight.values()) {
+      if (flight.ownerWebContentsId === ownerWebContentsId) return;
+    }
+    this.thumbnailOwnerGenerations.delete(ownerWebContentsId);
+  }
+
   // Clear renderer-owned thumbnail state when its webContents is destroyed.
   cleanupOwner(ownerWebContentsId) {
-    return this.clearThumbnailCache(ownerWebContentsId);
+    this.thumbnailOwnerGenerations.set(
+      ownerWebContentsId,
+      (this.thumbnailOwnerGenerations.get(ownerWebContentsId) || 0) + 1,
+    );
+    const processes = this.thumbnailProcesses.get(ownerWebContentsId);
+    if (processes) {
+      for (const child of processes) this.killProcess(child);
+      this.thumbnailProcesses.delete(ownerWebContentsId);
+    }
+    const removed = this.clearThumbnailCache(ownerWebContentsId);
+    this._pruneThumbnailOwnerGeneration(ownerWebContentsId);
+    return removed;
   }
 
   _decodeThumbnailBuffer(buffer) {
@@ -382,16 +405,21 @@ class ConversionService {
     return this.operationCoordinator.hasActive();
   }
 
-  trackProcess(child, operationOrJob = null) {
+  trackProcess(child, operationOrJob = undefined) {
     const operation = operationOrJob && operationOrJob.operation
       ? operationOrJob.operation
       : operationOrJob;
-    this.operationCoordinator.track(child, operation || this.operationCoordinator.active);
+    // undefined preserves the historical active-operation default; null is an
+    // explicit coordinator-only track for thumbnails and similar consumers.
+    const coordinatorOperation = operationOrJob === null
+      ? null
+      : (operation || this.operationCoordinator.active);
+    this.operationCoordinator.track(child, coordinatorOperation);
     if (operationOrJob && operationOrJob.processes) operationOrJob.processes.add(child);
   }
 
   killProcess(child) {
-    this.operationCoordinator.kill(child);
+    return this.operationCoordinator.kill(child);
   }
 
   untrackProcess(child, operationOrJob = null) {
@@ -409,6 +437,7 @@ class ConversionService {
     if (!job || job.terminalized) return;
     job.terminalized = true;
     job.status = 'error';
+    this._killJobProcesses(job);
     this.jobs.delete(job.jobId);
     if (this.activeJobByWindow.get(job.senderId) === job.jobId) this.activeJobByWindow.delete(job.senderId);
     this.releaseOperation(job.operation);
@@ -419,6 +448,7 @@ class ConversionService {
     if (!job || !job.processes) return;
     for (const child of job.processes) this.killProcess(child);
   }
+
 
   _finalizeJob(job, terminal) {
     if (!job || job.terminalized) return false;
@@ -441,13 +471,13 @@ class ConversionService {
   }
 
   dispose() {
-    if (this.disposed) return;
+    if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     for (const job of this.jobs.values()) {
       job.cancelRequested = true;
       try { job.abortController.abort(); } catch {}
     }
-    this.operationCoordinator.dispose();
+    const coordinatorDispose = this.operationCoordinator.dispose();
     for (const job of [...this.jobs.values()]) {
       this._finalizeJob(job, {
         status: 'cancelled',
@@ -456,9 +486,14 @@ class ConversionService {
       job.processes.clear();
       this.releaseOperation(job.operation);
     }
-    this.activeProcesses.clear();
-    this.clearThumbnailCache();
-    this.thumbnailInFlight.clear();
+    this.disposePromise = Promise.resolve(coordinatorDispose).then(() => {
+      this.activeProcesses.clear();
+      this.thumbnailProcesses.clear();
+      this.thumbnailOwnerGenerations.clear();
+      this.clearThumbnailCache();
+      this.thumbnailInFlight.clear();
+    });
+    return this.disposePromise;
   }
 
   // Create source token after successful eligible inspection
@@ -610,6 +645,7 @@ class ConversionService {
         trackProcess: (child) => this.trackProcess(child, job),
         untrackProcess: (child) => this.untrackProcess(child, job),
         killProcess: (child) => this.killProcess(child),
+        terminationGraceMs: this.operationPolicy.terminationGraceMs,
       });
     } catch {
       reval = { ok: false };
@@ -668,6 +704,7 @@ class ConversionService {
       trackProcess: (child) => this.trackProcess(child, job),
       untrackProcess: (child) => this.untrackProcess(child, job),
       killProcess: (child) => this.killProcess(child),
+      terminationGraceMs: this.operationPolicy.terminationGraceMs,
     };
   }
 
@@ -739,21 +776,39 @@ class ConversionService {
             : exit);
       }
       return new Promise((resolve) => {
+        if (options.abortSignal && options.abortSignal.aborted) {
+          resolve({ outcome: 'cancelled', reason: 'cancelled' });
+          return;
+        }
         let proc;
         try {
-          proc = spawn(verifierPath, [reval.canonical, stagingPath, expectedProfile], { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+          proc = spawn(verifierPath, [reval.canonical, stagingPath, expectedProfile], {
+            detached: true,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          markProcessGroupOwned(proc);
         } catch {
           resolve({ outcome: 'error', reason: 'verification_failed' });
           return;
         }
         let finished = false;
+        const onAbort = () => {
+          if (finished) return;
+          try { options.killProcess(proc); } catch {}
+        };
         const done = (result) => {
           if (finished) return;
           finished = true;
+          try { options.abortSignal.removeEventListener('abort', onAbort); } catch {}
           options.untrackProcess(proc);
           resolve(result);
         };
         options.trackProcess(proc);
+        try {
+          options.abortSignal.addEventListener('abort', onAbort, { once: true });
+          if (options.abortSignal.aborted) onAbort();
+        } catch {}
         const onActivity = () => options.touchActivity();
         try { proc.stdout.on('data', onActivity); } catch {}
         try { proc.stderr.on('data', onActivity); } catch {}
@@ -835,6 +890,8 @@ class ConversionService {
       trackProcess: options.trackProcess,
       untrackProcess: options.untrackProcess,
       touchActivity: options.touchActivity,
+      killProcess: options.killProcess,
+      terminationGraceMs: options.terminationGraceMs,
     }));
     if (job.terminalized) return;
     if (job.cancelRequested || conversion.outcome === 'cancelled') {
@@ -1057,7 +1114,9 @@ class ConversionService {
     return this.outputs.get(outputId) || null;
   }
 
-  async _generateThumbnailDataUrl({ outputId, senderWebContentsId, canonicalPath }) {
+  async _generateThumbnailDataUrl({ outputId, senderWebContentsId, canonicalPath, ownerGeneration }) {
+    const ownerStillActive = () => !this.disposed
+      && (this.thumbnailOwnerGenerations.get(senderWebContentsId) || 0) === ownerGeneration;
     try {
       const ffmpegPath = this.dependencies.bExecutor && typeof this.dependencies.bExecutor.getFfmpegAbsolute === 'function'
         ? this.dependencies.bExecutor.getFfmpegAbsolute()
@@ -1071,6 +1130,7 @@ class ConversionService {
         return { ok: false, reason: 'thumbnail_failed' };
       }
       const attempt = (seek) => {
+        if (!ownerStillActive()) return Promise.resolve(null);
         // Revalidate immediately before each decoder invocation; thumbnailing is
         // also an output consumer and must never read an untrusted replacement.
         const current = this.resolveOutputForDrag({ outputId, senderWebContentsId });
@@ -1080,6 +1140,7 @@ class ConversionService {
             '-nostdin', '-loglevel', 'error',
             '-ss', String(seek),
             '-i', canonicalPath,
+            '-map', '0:V:0',
             '-frames:v', '1',
             '-vf', 'scale=120:68:force_original_aspect_ratio=decrease,pad=120:68:(ow-iw)/2:(oh-ih)/2:color=black',
             '-q:v', '6',
@@ -1087,7 +1148,19 @@ class ConversionService {
           ];
           let child;
           try {
-            child = this.dependencies.spawn(ffmpegPath, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+            child = this.dependencies.spawn(ffmpegPath, args, {
+              detached: true,
+              shell: false,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            markProcessGroupOwned(child);
+            this.trackProcess(child, null);
+            let ownerProcesses = this.thumbnailProcesses.get(senderWebContentsId);
+            if (!ownerProcesses) {
+              ownerProcesses = new Set();
+              this.thumbnailProcesses.set(senderWebContentsId, ownerProcesses);
+            }
+            ownerProcesses.add(child);
           } catch {
             resolve(null);
             return;
@@ -1095,10 +1168,19 @@ class ConversionService {
           const chunks = [];
           let total = 0;
           let finished = false;
+          const cleanupChild = () => {
+            try { this.untrackProcess(child, null); } catch {}
+            const ownerProcesses = this.thumbnailProcesses.get(senderWebContentsId);
+            if (ownerProcesses) {
+              ownerProcesses.delete(child);
+              if (ownerProcesses.size === 0) this.thumbnailProcesses.delete(senderWebContentsId);
+            }
+          };
           const timer = setTimeout(() => {
             if (finished) return;
             finished = true;
-            try { child.kill('SIGKILL'); } catch {}
+            try { this.killProcess(child); } catch {}
+            cleanupChild();
             resolve(null);
           }, 6000);
           child.stdout.on('data', (chunk) => {
@@ -1107,7 +1189,8 @@ class ConversionService {
               // Never return a truncated image as if it were decodable.
               finished = true;
               clearTimeout(timer);
-              try { child.kill('SIGKILL'); } catch {}
+              try { this.killProcess(child); } catch {}
+              cleanupChild();
               resolve({ tooLarge: true });
               return;
             }
@@ -1119,12 +1202,17 @@ class ConversionService {
             if (finished) return;
             finished = true;
             clearTimeout(timer);
+            cleanupChild();
             resolve(null);
           });
           child.on('close', (code) => {
-            if (finished) return;
+            if (finished) {
+              cleanupChild();
+              return;
+            }
             finished = true;
             clearTimeout(timer);
+            cleanupChild();
             if (code !== 0 || total === 0) {
               resolve(null);
               return;
@@ -1135,11 +1223,14 @@ class ConversionService {
       };
 
       let attemptResult = await attempt('0.5');
+      if (!ownerStillActive()) return { ok: false, reason: 'thumbnail_failed' };
       if (attemptResult && attemptResult.tooLarge) return { ok: false, reason: 'thumbnail_failed' };
       let buf = Buffer.isBuffer(attemptResult) ? attemptResult : null;
       let decoded = this._decodeThumbnailBuffer(buf);
       if (!decoded) {
+        if (!ownerStillActive()) return { ok: false, reason: 'thumbnail_failed' };
         attemptResult = await attempt('0');
+        if (!ownerStillActive()) return { ok: false, reason: 'thumbnail_failed' };
         if (attemptResult && attemptResult.tooLarge) return { ok: false, reason: 'thumbnail_failed' };
         buf = Buffer.isBuffer(attemptResult) ? attemptResult : null;
         decoded = this._decodeThumbnailBuffer(buf);
@@ -1181,6 +1272,7 @@ class ConversionService {
     if (cached) this._removeThumbnailCacheEntry(outputId, cached);
 
     const key = `${outputId}:${senderWebContentsId}:${fingerprint.size}:${fingerprint.sha256}`;
+    const ownerGeneration = this.thumbnailOwnerGenerations.get(senderWebContentsId) || 0;
     const existing = this.thumbnailInFlight.get(key);
     if (existing) return existing.promise;
     const flight = {
@@ -1193,6 +1285,7 @@ class ConversionService {
       outputId,
       senderWebContentsId,
       canonicalPath: resolved.canonicalPath,
+      ownerGeneration,
     }).then((result) => {
       if (result && result.ok && flight.cacheAllowed && !this.disposed) {
         const current = this.outputs.get(outputId);
@@ -1214,6 +1307,7 @@ class ConversionService {
       return await promise;
     } finally {
       if (this.thumbnailInFlight.get(key) === flight) this.thumbnailInFlight.delete(key);
+      this._pruneThumbnailOwnerGeneration(senderWebContentsId);
     }
   }
 

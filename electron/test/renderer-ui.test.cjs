@@ -99,13 +99,14 @@ test('format helpers privacy and correctness', () => {
   assert.equal(formatFileSize(12.4 * 1024 * 1024), '12.4 MB');
   assert.ok(formatFileSize(32 * 1024 * 1024).includes('MB'));
   // duration
-  assert.equal(formatDuration('5'), '5 s');
-  assert.equal(formatDuration('65'), '1:05');
+  assert.equal(formatDuration(5), '5 s');
+  assert.equal(formatDuration(65), '1:05');
   assert.equal(formatDuration(125.2), '2:05');
   assert.equal(formatDuration(null), '');
+  assert.equal(formatDuration('5'), '');
   assert.equal(formatDuration('invalid'), '');
   // file details combines without leaking
-  const d = formatFileDetails(12 * 1024 * 1024, '65');
+  const d = formatFileDetails(12 * 1024 * 1024, 65);
   assert.ok(d.includes('MB'));
   assert.ok(d.includes('1:05'));
   assert.equal(containsForbiddenVisible(d), false);
@@ -167,7 +168,7 @@ test('isEligibleResult and privacy – never uses profileId literal', () => {
 
 test('buildSafeTechnicalFields only safe semantic fields, no forbidden keys', () => {
   const { buildSafeTechnicalFields, containsForbiddenVisible } = helpers;
-  const res = { displayName: 'my.mov', size: 1234567, duration: '12.34', classification: 'hlgKnownLocal', sha256: 'a'.repeat(64), reason: 'allowlist_hlg_match', profileId: 'hlg-local-b-v1', color: { a: 1 } };
+  const res = { displayName: 'my.mov', size: 1234567, duration: 12.34, classification: 'hlgKnownLocal', sha256: 'a'.repeat(64), reason: 'allowlist_hlg_match', profileId: 'hlg-local-b-v1', color: { a: 1 } };
   const fields = buildSafeTechnicalFields(res);
   // should contain size/duration converted and biçim
   assert.ok(fields.some(f => f.label === 'Size'));
@@ -185,7 +186,7 @@ test('buildSafeTechnicalFields only safe semantic fields, no forbidden keys', ()
     assert.equal(containsForbiddenVisible(f.label), false);
   }
   // privacy: ensure no raw path leakage
-  const withPath = { displayName: '/tmp/secret.mov', size: 100, duration: '5', classification: 'uncertain' };
+  const withPath = { displayName: '/tmp/secret.mov', size: 100, duration: 5, classification: 'uncertain' };
   const f2 = buildSafeTechnicalFields(withPath);
   const vals = f2.map(x => x.value).join(' ');
   assert.equal(vals.includes('/tmp'), false);

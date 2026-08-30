@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from prototype.path_boundary import validate_local_path, validate_user_selected_path, PathValidationError
+from prototype.path_boundary import (
+    validate_local_path,
+    validate_user_selected_path,
+    PathValidationError,
+    _is_within,
+    canonical_paths_equal,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_ROOT = REPO_ROOT / "Sample"
@@ -13,6 +19,20 @@ class TestPathBoundary(unittest.TestCase):
     def setUp(self):
         # ensure Sample root exists
         SAMPLE_ROOT.mkdir(exist_ok=True)
+
+    def test_canonical_containment_is_case_sensitive_and_component_wise(self):
+        root = Path("/private/tmp/HdrToSdr")
+        self.assertTrue(_is_within(root / "source.mov", root))
+        self.assertFalse(_is_within(Path("/private/tmp/hdrtosdr/source.mov"), root))
+        self.assertFalse(_is_within(Path("/private/tmp/HdrToSdr-other/source.mov"), root))
+
+    def test_path_parity_fixture_matches_python_policy(self):
+        import json
+        fixture = Path(__file__).parent / "fixtures" / "path-parity.json"
+        for case in json.loads(fixture.read_text()):
+            with self.subTest(case=case["name"]):
+                self.assertEqual(canonical_paths_equal(case["left"], case["right"], platform="darwin"), case["darwinEqual"])
+                self.assertEqual(canonical_paths_equal(case["left"], case["right"], platform="linux"), case["posixEqual"])
 
     def test_valid_known_sample(self):
         # Sample/1.MOV exists

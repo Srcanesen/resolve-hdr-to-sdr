@@ -4,6 +4,13 @@ from pathlib import Path
 from typing import Tuple
 
 
+_ALLOWED_CANONICAL_ALIASES = {
+    "/tmp": "/private/tmp",
+    "/var": "/private/var",
+    "/etc": "/private/etc",
+}
+
+
 # macOS exposes these compatibility links for ordinary temporary/system paths.
 # They are the only symlinks accepted by the source policy.
 _ALLOWED_SYSTEM_SYMLINKS = {
@@ -24,24 +31,35 @@ def get_sample_root(repo_root: Path) -> Path:
 
 
 def _is_within(child: Path, parent: Path) -> bool:
-    """Check if child is within parent, handling APFS case-insensitive filesystem."""
+    """Check canonical paths by component, preserving case."""
     try:
         child.relative_to(parent)
         return True
-    except ValueError:
-        pass
-    # Fallback for case-insensitive filesystems (macOS APFS): compare lowercased strings
-    # Use os.path.commonpath equivalent with case folding on Darwin
-    try:
-        # Normalize both to lower for comparison on case-insensitive FS
-        cs = str(child).lower()
-        ps = str(parent).lower()
-        # Ensure ps ends without trailing slash for prefix check
-        if cs == ps or cs.startswith(ps.rstrip("/") + "/"):
-            return True
-    except Exception:
-        pass
-    return False
+    except (ValueError, TypeError):
+        return False
+
+
+def normalize_canonical_path(value: str, platform: str = None) -> str:
+    """Normalize an already-resolved path for cross-runtime policy parity.
+
+    Case is intentionally preserved on every platform. Only the explicit macOS
+    compatibility aliases are rewritten, matching Node's source policy.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    platform = os.sys.platform if platform is None else platform
+    normalized = os.path.normpath(os.path.abspath(value))
+    if platform == "darwin":
+        for alias, target in _ALLOWED_CANONICAL_ALIASES.items():
+            if normalized == alias:
+                normalized = target
+            elif normalized.startswith(alias + os.sep):
+                normalized = target + normalized[len(alias):]
+    return normalized
+
+
+def canonical_paths_equal(first: str, second: str, platform: str = None) -> bool:
+    return normalize_canonical_path(first, platform) == normalize_canonical_path(second, platform)
 
 
 def _validate_common_input(path_str: str) -> Path:

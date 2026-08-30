@@ -21,6 +21,8 @@ def run_cli(payload_bytes):
 
 class TestInspectCli(unittest.TestCase):
     def test_valid_known_sample_produces_complete(self):
+        if os.environ.get("HDRTOSDR_RUN_LIVE_SAMPLES") != "1":
+            self.skipTest("live Sample media validation is opt-in; normal checks use owned fakes")
         sample = REPO_ROOT / "Sample" / "1.MOV"
         if not sample.exists():
             self.skipTest("Sample/1.MOV absent")
@@ -94,6 +96,8 @@ class TestInspectCli(unittest.TestCase):
         self.assertNotIn("File \"", out)
 
     def test_no_output_file_created(self):
+        if os.environ.get("HDRTOSDR_RUN_LIVE_SAMPLES") != "1":
+            self.skipTest("live Sample media validation is opt-in; normal checks use owned fakes")
         # Run valid inspect and ensure Output not changed
         output_dir = REPO_ROOT / "Output"
         before = set()

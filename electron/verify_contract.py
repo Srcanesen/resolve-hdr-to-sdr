@@ -4,6 +4,21 @@ import json
 import math
 import re
 import sys
+from pathlib import Path
+
+# This verifier is also executed as a standalone script from electron/.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from prototype.evidence import (  # noqa: E402
+    EvidenceError,
+    extract_evidence,
+    selected_video_frames,
+    select_primary_video_stream,
+    side_data_list,
+    source_profile_matches,
+)
 
 
 def _load(value, label):
@@ -21,7 +36,7 @@ def _number(value, label, field):
         return None, f"FAIL: missing {field} for {label}"
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None, f"FAIL: invalid {field} for {label}"
     if not math.isfinite(number):
         return None, f"FAIL: invalid {field} for {label}"
@@ -29,11 +44,10 @@ def _number(value, label, field):
 
 
 def _video(data, label):
-    streams = [stream for stream in data["streams"]
-               if isinstance(stream, dict) and stream.get("codec_type") == "video"]
-    if not streams:
-        return None, f"FAIL: missing video stream for {label}"
-    video = streams[0]
+    try:
+        _, video, _, _ = select_primary_video_stream(data["streams"])
+    except EvidenceError:
+        return None, f"FAIL: missing or invalid primary video stream for {label}"
     width, error = _number(video.get("width"), label, "video width")
     if error:
         return None, error
@@ -54,6 +68,8 @@ def _video(data, label):
     duration, error = _number(duration_value, label, "video duration")
     if error:
         return None, error
+    if duration <= 0:
+        return None, f"FAIL: invalid video duration for {label}"
 
     # ffmpeg may autorotate a source with a display matrix. Compare presentation
     # dimensions rather than only the stored raster dimensions.
@@ -125,12 +141,13 @@ def verify_media_contract(source, output, tolerance=0.05):
 
 def _side_data_kind(name):
     normalized = str(name).lower().replace("_", " ")
+    compact = normalized.replace(" ", "")
     if "mastering display metadata" in normalized or "mastering display" in normalized or "mdcv" in normalized:
         return "MDCV"
     if "content light level metadata" in normalized or "content light" in normalized or "clli" in normalized:
         return "CLLI"
-    if ("hdr10+" in normalized or "hdr10 plus" in normalized or "hdr10plus" in normalized
-            or "st2094" in normalized or "dynamic hdr plus" in normalized):
+    if ("hdr10+" in compact or "hdr10plus" in compact or "st2094" in compact
+            or "dynamic hdr plus" in normalized):
         return "HDR10+"
     if "dovi" in normalized or "dolby vision" in normalized:
         return "DOVI"
@@ -142,31 +159,48 @@ def _side_data_kind(name):
 
 
 def scan_bounded_hdr_side_data(probe, limit=32):
-    """Return (ok, diagnostic), scanning stream data and at most ``limit`` frames."""
+    """Return (ok, diagnostic), scanning only the primary real video stream."""
     data, error = _load(probe, "bounded output HDR side-data")
     if error:
         return False, error
-    frames = data.get("frames", []) or []
-    if not isinstance(frames, list):
-        return False, "FAIL: invalid bounded output frame list"
-    items = [stream for stream in data.get("streams", []) or [] if isinstance(stream, dict)]
-    items.extend(frame for frame in frames[:int(limit)] if isinstance(frame, dict))
-    forbidden = []
-    for item in items:
-        side_data = item.get("side_data_list")
-        if side_data is None:
-            side_data = item.get("side_data", []) or []
-        if not isinstance(side_data, list):
-            continue
-        for side_item in side_data:
-            if not isinstance(side_item, dict):
-                continue
-            kind = _side_data_kind(side_item.get("side_data_type", ""))
-            if kind:
-                forbidden.append(f"{kind} ({side_item.get('side_data_type', '')})")
+    try:
+        _, video, stream_index, real_video_count = select_primary_video_stream(data["streams"])
+        frames = selected_video_frames(data, stream_index, real_video_count)
+        selected_frames = []
+        for frame in frames:
+            if len(selected_frames) >= int(limit):
+                break
+            selected_frames.append(frame)
+        items = [video, *selected_frames]
+        forbidden = []
+        for item in items:
+            for side_item in side_data_list(item):
+                if not isinstance(side_item, dict):
+                    return False, "FAIL: invalid bounded output side-data"
+                kind = _side_data_kind(side_item.get("side_data_type", ""))
+                if kind:
+                    forbidden.append(f"{kind} ({side_item.get('side_data_type', '')})")
+    except (EvidenceError, TypeError, ValueError):
+        return False, "FAIL: invalid bounded output video evidence"
     if forbidden:
         return False, "FAIL: output contains forbidden HDR frame side data in bounded scan: " + ", ".join(forbidden)
     return True, f"OK: bounded output scan of up to {int(limit)} frames contains no forbidden HDR side data"
+
+
+def verify_source_profile(probe, profile_id):
+    """Re-gate a source using the exact normalized evidence used by inspection."""
+    data, error = _load(probe, "source profile")
+    if error:
+        return False, error
+    if profile_id not in {"hlg-rec709-v1", "pq-rec709-v1"}:
+        return False, "FAIL: unsupported source profile"
+    try:
+        evidence = extract_evidence(data, "source", 0, "")
+    except EvidenceError:
+        return False, "FAIL: invalid source video evidence"
+    if not source_profile_matches(evidence, profile_id):
+        return False, f"FAIL: source evidence does not match {profile_id}"
+    return True, f"OK: source evidence matches {profile_id}"
 
 
 def scan_semantic_privacy_tags(probe):
@@ -224,6 +258,8 @@ def main(argv=None):
         ok, message = verify_media_contract(records[0], records[1], float(argv[0]))
     elif mode == "hdr" and len(argv) == 1:
         ok, message = scan_bounded_hdr_side_data(sys.stdin.buffer.read(), int(argv[0]))
+    elif mode == "source" and len(argv) == 1:
+        ok, message = verify_source_profile(sys.stdin.buffer.read(), argv[0])
     elif mode == "privacy" and not argv:
         ok, message = scan_semantic_privacy_tags(sys.stdin.buffer.read())
     else:
